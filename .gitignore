@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Environment
+.env
+.env.local
+backend/.env
+frontend/.env.local
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
