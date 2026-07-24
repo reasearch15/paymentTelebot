@@ -1,26 +1,10 @@
 import { AdminShell } from "@/components/AdminShell";
+import { SettlementsBrowser } from "@/components/SettlementsBrowser";
 
 export default function SettlementsPage() {
   return (
-    <AdminShell title="Settlements" description="Settlement history will be shown once settlement actions are implemented.">
-      <section className="table-shell">
-        <table className="placeholder-table">
-          <thead>
-            <tr>
-              <th>Settled</th>
-              <th>Amount</th>
-              <th>Balance Before</th>
-              <th>Balance After</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td colSpan={5}>No settlements recorded.</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
+    <AdminShell title="Settlements" description="Completed cash settlements against unsettled payment balances.">
+      <SettlementsBrowser />
     </AdminShell>
   );
 }

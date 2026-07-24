@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.settlement import AccountUnsettledBalance
+
 
 class TransactionSummary(BaseModel):
     id: int
@@ -27,12 +29,14 @@ class TransactionSummary(BaseModel):
 class LedgerTotals(BaseModel):
     total_incoming_cents: int
     total_outgoing_cents: int
-    net_balance_cents: int
+    total_settled_cents: int
+    unsettled_balance_cents: int
     total_transactions: int
 
 
 class LedgerListResponse(BaseModel):
     transactions: list[TransactionSummary]
     totals: LedgerTotals
+    account_balances: list[AccountUnsettledBalance]
     limit: int
     offset: int

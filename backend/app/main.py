@@ -6,6 +6,7 @@ from app.api.listener import router as listener_router
 from app.api.payment_accounts import router as payment_accounts_router
 from app.api.payment_emails import router as payment_emails_router
 from app.api.providers import router as providers_router
+from app.api.settlements import router as settlements_router
 from app.api.telegram import router as telegram_router
 from app.api.transactions import router as transactions_router
 from app.core.config import settings
@@ -32,6 +33,7 @@ app.include_router(providers_router)
 app.include_router(payment_accounts_router)
 app.include_router(payment_emails_router)
 app.include_router(transactions_router)
+app.include_router(settlements_router)
 app.include_router(listener_router)
 app.include_router(telegram_router)
 

@@ -1,13 +1,15 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import Select, case, func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.auth import require_admin
 from app.db.session import get_db
 from app.models.payment_account import PaymentAccount
-from app.models.transaction import Direction, Transaction
+from app.models.transaction import Transaction
+from app.schemas.settlement import AccountUnsettledBalance
 from app.schemas.transaction import LedgerListResponse, LedgerTotals, TransactionSummary
+from app.services.settlement import compute_unsettled_balance_cents, sum_settled_cents, sum_transaction_amounts
 
 router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_admin)])
 
@@ -55,40 +57,35 @@ async def compute_ledger_totals(
     db: AsyncSession,
     *,
     payment_account_id: int | None = None,
-    provider_id: int | None = None,
-    direction: str | None = None,
 ) -> LedgerTotals:
-    query = (
-        select(
-            func.count(Transaction.id),
-            func.coalesce(
-                func.sum(case((Transaction.direction == Direction.IN, Transaction.amount_cents), else_=0)),
-                0,
-            ),
-            func.coalesce(
-                func.sum(case((Transaction.direction == Direction.OUT, Transaction.amount_cents), else_=0)),
-                0,
-            ),
-        )
-        .select_from(Transaction)
-        .join(Transaction.payment_account)
-        .join(PaymentAccount.provider)
-    )
-    query = apply_transaction_filters(
-        query,
-        payment_account_id=payment_account_id,
-        provider_id=provider_id,
-        direction=direction,
-    )
-    total_transactions, total_incoming_cents, total_outgoing_cents = (await db.execute(query)).one()
-    incoming = int(total_incoming_cents)
-    outgoing = int(total_outgoing_cents)
+    incoming, outgoing = await sum_transaction_amounts(db, payment_account_id=payment_account_id)
+    settled = await sum_settled_cents(db, payment_account_id=payment_account_id)
+    count_query = select(func.count(Transaction.id))
+    if payment_account_id is not None:
+        count_query = count_query.where(Transaction.payment_account_id == payment_account_id)
+    total_transactions = int((await db.execute(count_query)).scalar_one())
     return LedgerTotals(
         total_incoming_cents=incoming,
         total_outgoing_cents=outgoing,
-        net_balance_cents=incoming - outgoing,
-        total_transactions=int(total_transactions),
+        total_settled_cents=settled,
+        unsettled_balance_cents=incoming - outgoing - settled,
+        total_transactions=total_transactions,
     )
+
+
+async def list_account_balances(db: AsyncSession) -> list[AccountUnsettledBalance]:
+    result = await db.execute(select(PaymentAccount).order_by(PaymentAccount.friendly_name, PaymentAccount.id))
+    balances: list[AccountUnsettledBalance] = []
+    for account in result.scalars().all():
+        unsettled = await compute_unsettled_balance_cents(db, payment_account_id=account.id)
+        balances.append(
+            AccountUnsettledBalance(
+                payment_account_id=account.id,
+                friendly_name=account.friendly_name,
+                unsettled_balance_cents=unsettled,
+            )
+        )
+    return balances
 
 
 @router.get("", response_model=LedgerListResponse)
@@ -117,10 +114,12 @@ async def list_transactions(
     )
     result = await db.execute(query)
     transactions = [serialize_transaction(row) for row in result.scalars().all()]
-    totals = await compute_ledger_totals(
-        db,
-        payment_account_id=payment_account_id,
-        provider_id=provider_id,
-        direction=direction,
+    totals = await compute_ledger_totals(db, payment_account_id=payment_account_id)
+    account_balances = await list_account_balances(db)
+    return LedgerListResponse(
+        transactions=transactions,
+        totals=totals,
+        account_balances=account_balances,
+        limit=limit,
+        offset=offset,
     )
-    return LedgerListResponse(transactions=transactions, totals=totals, limit=limit, offset=offset)

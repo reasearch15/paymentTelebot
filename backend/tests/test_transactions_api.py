@@ -1,14 +1,20 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
 
 from app.api.transactions import serialize_transaction
 from app.models.payment_account import PaymentAccount
 from app.models.provider import Provider
+from app.models.settlement import Settlement
 from app.models.transaction import Direction, Transaction
 from app.parsers.base import ParserResult
+from app.schemas.settlement import SettlementCreate, parse_dollar_amount_to_cents
 from app.schemas.transaction import LedgerTotals
 from app.services.ledger import create_transaction_from_parser_result
-import asyncio
+from app.services.settlement import create_settlement
 
 
 def test_serialize_transaction_includes_ledger_fields() -> None:
@@ -50,15 +56,42 @@ def test_serialize_transaction_includes_ledger_fields() -> None:
     assert summary.telegram_status == "sent"
 
 
-def test_ledger_totals_net_balance_math() -> None:
+def test_ledger_totals_unsettled_balance_math() -> None:
     totals = LedgerTotals(
-        total_incoming_cents=1500,
-        total_outgoing_cents=400,
-        net_balance_cents=1100,
-        total_transactions=3,
+        total_incoming_cents=2000,
+        total_outgoing_cents=0,
+        total_settled_cents=1500,
+        unsettled_balance_cents=500,
+        total_transactions=2,
     )
-    assert totals.net_balance_cents == totals.total_incoming_cents - totals.total_outgoing_cents
-    assert totals.total_transactions == 3
+    assert totals.unsettled_balance_cents == (
+        totals.total_incoming_cents - totals.total_outgoing_cents - totals.total_settled_cents
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("15", 1500),
+        ("15.00", 1500),
+        ("$15.00", 1500),
+        ("1,234.56", 123456),
+        ("0.01", 1),
+    ],
+)
+def test_parse_dollar_amount_to_cents(raw: str, expected: int) -> None:
+    assert parse_dollar_amount_to_cents(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "0", "0.00", "-5", "-0.01"])
+def test_parse_dollar_amount_rejects_invalid(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_dollar_amount_to_cents(raw)
+
+
+def test_settlement_create_schema_rejects_empty_amount() -> None:
+    with pytest.raises(ValidationError):
+        SettlementCreate(payment_account_id=1, amount="   ")
 
 
 class FakeLedgerSession:
@@ -68,7 +101,6 @@ class FakeLedgerSession:
         self.flushes = 0
 
     async def scalar(self, query):
-        # Dedup lookup is always by gmail_message_id equality in create_transaction_from_parser_result.
         for value in getattr(query, "_where_criteria", ()):
             right = getattr(value, "right", None)
             message_id = getattr(right, "value", None)
@@ -136,3 +168,58 @@ def test_duplicate_gmail_message_creates_one_transaction() -> None:
     assert first is second
     assert len(session.added) == 1
     assert session.flushes == 1
+
+
+class FakeSettlementSession:
+    def __init__(self, account: PaymentAccount, incoming_cents: int) -> None:
+        self.account = account
+        self.incoming_cents = incoming_cents
+        self.settlements: list[Settlement] = []
+        self.added: list[Settlement] = []
+
+    async def scalar(self, query):
+        entity = query.column_descriptions[0]["entity"]
+        if entity is PaymentAccount:
+            return self.account
+        return None
+
+    async def execute(self, query):
+        sql = str(query).lower()
+        if "from transactions" in sql or "transactions.direction" in sql:
+            return SimpleNamespace(one=lambda: (self.incoming_cents, 0))
+        if "from settlements" in sql or "sum(settlements" in sql:
+            settled = sum(item.amount_cents for item in self.settlements)
+            return SimpleNamespace(scalar_one=lambda: settled)
+        raise AssertionError(f"Unexpected query: {query}")
+
+    def add(self, item) -> None:
+        self.added.append(item)
+        self.settlements.append(item)
+
+    async def flush(self) -> None:
+        if self.added and getattr(self.added[-1], "id", None) is None:
+            self.added[-1].id = len(self.settlements)
+
+
+def test_create_settlement_partial_and_rejects_over_balance() -> None:
+    account = PaymentAccount(
+        id=1,
+        provider_id=1,
+        friendly_name="Larry",
+        gmail_address="larry@example.com",
+        encrypted_app_password="encrypted",
+    )
+    session = FakeSettlementSession(account, incoming_cents=2000)
+
+    first = asyncio.run(create_settlement(session, payment_account_id=1, amount_cents=1500, note="partial"))
+    assert first.amount_cents == 1500
+    assert first.balance_before_cents == 2000
+    assert first.balance_after_cents == 500
+
+    with pytest.raises(ValueError, match="exceeds unsettled balance"):
+        asyncio.run(create_settlement(session, payment_account_id=1, amount_cents=2100, note=None))
+
+    second = asyncio.run(create_settlement(session, payment_account_id=1, amount_cents=500, note="remainder"))
+    assert second.balance_before_cents == 500
+    assert second.balance_after_cents == 0
+    assert len(session.settlements) == 2
