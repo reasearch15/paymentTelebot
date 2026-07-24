@@ -70,7 +70,7 @@ class GmailImapClient:
     def fetch_new_messages(self, since_uid: int, batch_size: int, mailbox: str = MAILBOX) -> list[RawEmailFetch]:
         connection = self._require_connection()
         self.select_mailbox(mailbox)
-        search_start_uid = max(1, since_uid - settings.gmail_uid_lookback_count + 1)
+        search_start_uid = since_uid + 1 if since_uid > 0 else 1
         search_query = f"UID {search_start_uid}:*"
         logger.info(
             "Gmail poll mailbox=%s checkpoint=%s search=%s",

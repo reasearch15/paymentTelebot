@@ -37,6 +37,7 @@ class Transaction(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     telegram_status: Mapped[str] = mapped_column(String(40), nullable=False, default="pending", server_default="pending")
     telegram_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    telegram_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     telegram_last_error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     raw_subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
     raw_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -5,6 +5,7 @@ from app.services.gmail_imap import GmailImapClient
 class FakeImap:
     closed = False
     logged_out = False
+    search_queries = []
 
     def __init__(self, host: str, port: int, timeout: int) -> None:
         assert host == "imap.gmail.com"
@@ -23,7 +24,7 @@ class FakeImap:
 
     def uid(self, command: str, *args):
         if command == "search":
-            assert args == (None, "UID 18:*")
+            FakeImap.search_queries.append(args[1])
             return "OK", [b"43 44"]
         if command == "fetch":
             uid = args[0]
@@ -39,6 +40,9 @@ class FakeImap:
 
 
 def test_fetches_uid_batch_and_logs_out(monkeypatch) -> None:
+    FakeImap.closed = False
+    FakeImap.logged_out = False
+    FakeImap.search_queries = []
     monkeypatch.setattr(gmail_imap.imaplib, "IMAP4_SSL", FakeImap)
 
     with GmailImapClient("user@gmail.com", "app-password", timeout_seconds=20) as client:
@@ -47,5 +51,19 @@ def test_fetches_uid_batch_and_logs_out(monkeypatch) -> None:
     assert len(messages) == 1
     assert messages[0].gmail_uid == 44
     assert b"Subject: Test 44" in messages[0].raw_message
+    assert FakeImap.search_queries == ["UID 43:*"]
     assert FakeImap.closed is True
     assert FakeImap.logged_out is True
+
+
+def test_first_poll_starts_at_uid_one(monkeypatch) -> None:
+    FakeImap.closed = False
+    FakeImap.logged_out = False
+    FakeImap.search_queries = []
+    monkeypatch.setattr(gmail_imap.imaplib, "IMAP4_SSL", FakeImap)
+
+    with GmailImapClient("user@gmail.com", "app-password", timeout_seconds=20) as client:
+        messages = client.fetch_new_messages(0, 1)
+
+    assert len(messages) == 1
+    assert FakeImap.search_queries == ["UID 1:*"]

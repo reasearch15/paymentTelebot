@@ -3,6 +3,7 @@ import logging
 import signal
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import perf_counter
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -164,6 +165,7 @@ async def fetch_account_messages(target: AccountPollTarget) -> list[RawEmailFetc
 
 async def poll_account(target: AccountPollTarget) -> None:
     checked_at = datetime.now(UTC)
+    poll_started = perf_counter()
     logger.info(
         "Polling Gmail account id=%s friendly=%s mailbox=%s checkpoint=%s",
         target.id,
@@ -172,7 +174,9 @@ async def poll_account(target: AccountPollTarget) -> None:
         target.last_uid,
     )
     try:
+        fetch_started = perf_counter()
         raw_messages = await fetch_account_messages(target)
+        fetch_elapsed_ms = int((perf_counter() - fetch_started) * 1000)
     except GmailConnectionError:
         await update_account_status(target.id, "error", checked_at)
         return
@@ -181,7 +185,12 @@ async def poll_account(target: AccountPollTarget) -> None:
         return
 
     await update_account_status(target.id, "connected", checked_at)
-    logger.info("Gmail account id=%s fetched_count=%s", target.id, len(raw_messages))
+    logger.info(
+        "Gmail account id=%s fetched_count=%s fetch_elapsed_ms=%s",
+        target.id,
+        len(raw_messages),
+        fetch_elapsed_ms,
+    )
     for raw_fetch in raw_messages:
         try:
             extracted = extract_email(raw_fetch.raw_message)
@@ -203,6 +212,7 @@ async def poll_account(target: AccountPollTarget) -> None:
                 safe_log_text(exc, 500),
             )
             await mark_email_failure(target.id, raw_fetch, str(exc))
+    logger.info("Gmail account id=%s poll_elapsed_ms=%s", target.id, int((perf_counter() - poll_started) * 1000))
 
 
 async def heartbeat(status: str = "alive") -> None:

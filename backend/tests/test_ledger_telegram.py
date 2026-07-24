@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from app.api.telegram import serialize_settings
@@ -10,7 +10,14 @@ from app.models.transaction import Direction, Transaction
 from app.parsers.base import ParserResult
 from app.schemas.telegram import TelegramSettingsUpdate
 from app.services.ledger import create_transaction_from_parser_result
-from app.services.telegram import format_kathmandu_timestamp, format_transaction_message, notify_transaction_in_session
+from app.services.telegram import (
+    TELEGRAM_SENDING_STALE_AFTER,
+    format_kathmandu_timestamp,
+    format_transaction_message,
+    notify_transaction_in_session,
+    send_transaction_notification,
+    should_send_transaction_notification,
+)
 
 
 def parser_result(classification: str = "incoming_payment", direction: str = "IN") -> ParserResult:
@@ -70,7 +77,12 @@ def test_duplicate_email_creates_one_transaction() -> None:
     assert session.flushes == 1
 
 
-def build_transaction(direction: Direction = Direction.IN, status: str = "pending") -> Transaction:
+def build_transaction(
+    direction: Direction = Direction.IN,
+    status: str = "pending",
+    *,
+    telegram_attempted_at: datetime | None = None,
+) -> Transaction:
     provider = Provider(id=1, name="Chime", parser_key="chime", enabled=True)
     account = PaymentAccount(
         id=1,
@@ -89,9 +101,74 @@ def build_transaction(direction: Direction = Direction.IN, status: str = "pendin
         gmail_message_id="<message@example.com>",
         received_at=datetime(2026, 7, 24, 11, 23, tzinfo=UTC),
         telegram_status=status,
+        telegram_attempted_at=telegram_attempted_at,
     )
     transaction.payment_account = account
     return transaction
+
+
+class _AsyncCM:
+    def __init__(self, value):
+        self._value = value
+
+    async def __aenter__(self):
+        return self._value
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class FakeTelegramSession:
+    def __init__(self, store: "FakeTelegramStore") -> None:
+        self.store = store
+
+    def begin(self):
+        store = self.store
+
+        class _BeginCM:
+            async def __aenter__(inner_self):
+                return self
+
+            async def __aexit__(inner_self, exc_type, exc, tb) -> bool:
+                # Mirrors session.begin() commit: claim is durable before Telegram I/O.
+                if exc_type is None and store.transaction.telegram_status == "sending":
+                    store.claim_committed = True
+                return False
+
+        return _BeginCM()
+
+    async def scalar(self, query):
+        entity = query.column_descriptions[0]["entity"]
+        if entity is Transaction:
+            return self.store.transaction
+        if entity is TelegramIntegration:
+            return self.store.integration
+        raise AssertionError(f"Unexpected scalar entity: {entity}")
+
+    def add(self, item) -> None:
+        self.store.integration = item
+
+    async def flush(self) -> None:
+        return None
+
+
+class FakeTelegramStore:
+    def __init__(self, transaction: Transaction, integration: TelegramIntegration) -> None:
+        self.transaction = transaction
+        self.integration = integration
+        self.opened_sessions = 0
+        self.claim_committed = False
+
+    def session_factory(self):
+        self.opened_sessions += 1
+        return _AsyncCM(FakeTelegramSession(self))
+
+
+def install_fake_telegram_db(monkeypatch, transaction: Transaction, integration: TelegramIntegration) -> FakeTelegramStore:
+    store = FakeTelegramStore(transaction, integration)
+    monkeypatch.setattr("app.services.telegram.AsyncSessionLocal", store.session_factory)
+    monkeypatch.setattr("app.services.telegram.decrypt_secret", lambda _value: "token")
+    return store
 
 
 def test_telegram_eligibility_incoming_only(monkeypatch) -> None:
@@ -150,6 +227,137 @@ def test_duplicate_telegram_notification_is_not_resent(monkeypatch) -> None:
 
     asyncio.run(notify_transaction_in_session(transaction, integration))
 
+    assert transaction.telegram_status == "sent"
+
+
+def test_sending_telegram_notification_is_not_resent() -> None:
+    now = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+    recent = now - timedelta(seconds=5)
+    stale = now - TELEGRAM_SENDING_STALE_AFTER - timedelta(seconds=1)
+
+    assert should_send_transaction_notification(build_transaction(Direction.IN, status="pending"), now=now)
+    assert should_send_transaction_notification(build_transaction(Direction.IN, status="failed"), now=now)
+    assert not should_send_transaction_notification(build_transaction(Direction.IN, status="sent"), now=now)
+    assert not should_send_transaction_notification(
+        build_transaction(Direction.IN, status="sending", telegram_attempted_at=recent),
+        now=now,
+    )
+    assert should_send_transaction_notification(
+        build_transaction(Direction.IN, status="sending", telegram_attempted_at=stale),
+        now=now,
+    )
+    assert should_send_transaction_notification(
+        build_transaction(Direction.IN, status="sending", telegram_attempted_at=None),
+        now=now,
+    )
+
+
+def test_recent_sending_claim_skips_concurrent_second_caller(monkeypatch) -> None:
+    transaction = build_transaction(Direction.IN, status="pending")
+    integration = TelegramIntegration(bot_token_encrypted="encrypted", group_id="-100123", enabled=True)
+    store = install_fake_telegram_db(monkeypatch, transaction, integration)
+
+    claimed = asyncio.Event()
+    release = asyncio.Event()
+    send_calls = []
+
+    async def slow_send(_token: str, _group_id: str, _text: str):
+        assert store.claim_committed is True
+        assert transaction.telegram_status == "sending"
+        assert transaction.telegram_attempted_at is not None
+        send_calls.append("first")
+        claimed.set()
+        await release.wait()
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.telegram.telegram_send_message", slow_send)
+
+    async def run() -> None:
+        first = asyncio.create_task(send_transaction_notification(transaction.id))
+        await claimed.wait()
+        await send_transaction_notification(transaction.id)
+        assert len(send_calls) == 1
+        assert transaction.telegram_status == "sending"
+        release.set()
+        await first
+        assert transaction.telegram_status == "sent"
+        assert transaction.telegram_sent_at is not None
+
+    asyncio.run(run())
+
+
+def test_telegram_failure_leaves_transaction_retryable(monkeypatch) -> None:
+    transaction = build_transaction(Direction.IN, status="pending")
+    integration = TelegramIntegration(bot_token_encrypted="encrypted", group_id="-100123", enabled=True)
+    store = install_fake_telegram_db(monkeypatch, transaction, integration)
+
+    async def failing_send(_token: str, _group_id: str, _text: str):
+        assert store.claim_committed is True
+        raise RuntimeError("telegram timeout")
+
+    monkeypatch.setattr("app.services.telegram.telegram_send_message", failing_send)
+    asyncio.run(send_transaction_notification(transaction.id))
+
+    assert transaction.telegram_status == "failed"
+    assert transaction.telegram_last_error is not None
+    assert "telegram timeout" in transaction.telegram_last_error
+    assert should_send_transaction_notification(transaction)
+
+
+def test_stale_sending_state_is_recovered(monkeypatch) -> None:
+    stale_at = datetime.now(UTC) - TELEGRAM_SENDING_STALE_AFTER - timedelta(seconds=30)
+    transaction = build_transaction(Direction.IN, status="sending", telegram_attempted_at=stale_at)
+    integration = TelegramIntegration(bot_token_encrypted="encrypted", group_id="-100123", enabled=True)
+    store = install_fake_telegram_db(monkeypatch, transaction, integration)
+
+    async def fake_send(_token: str, _group_id: str, _text: str):
+        assert store.claim_committed is True
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.telegram.telegram_send_message", fake_send)
+    asyncio.run(send_transaction_notification(transaction.id))
+
+    assert transaction.telegram_status == "sent"
+    assert transaction.telegram_sent_at is not None
+    assert transaction.telegram_attempted_at is not None
+    assert transaction.telegram_attempted_at > stale_at
+
+
+def test_successful_sending_becomes_sent(monkeypatch) -> None:
+    transaction = build_transaction(Direction.IN, status="pending")
+    integration = TelegramIntegration(bot_token_encrypted="encrypted", group_id="-100123", enabled=True)
+    store = install_fake_telegram_db(monkeypatch, transaction, integration)
+
+    async def fake_send(_token: str, _group_id: str, _text: str):
+        assert store.claim_committed is True
+        assert transaction.telegram_status == "sending"
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.telegram.telegram_send_message", fake_send)
+    asyncio.run(send_transaction_notification(transaction.id))
+
+    assert transaction.telegram_status == "sent"
+    assert transaction.telegram_sent_at is not None
+    assert transaction.telegram_last_error is None
+    assert not should_send_transaction_notification(transaction)
+
+
+def test_process_restart_stale_sending_does_not_remain_blocked(monkeypatch) -> None:
+    # Crash after claim left status=sending with an old attempt stamp.
+    transaction = build_transaction(
+        Direction.IN,
+        status="sending",
+        telegram_attempted_at=datetime.now(UTC) - TELEGRAM_SENDING_STALE_AFTER - timedelta(minutes=5),
+    )
+    integration = TelegramIntegration(bot_token_encrypted="encrypted", group_id="-100123", enabled=True)
+    install_fake_telegram_db(monkeypatch, transaction, integration)
+
+    async def fake_send(_token: str, _group_id: str, _text: str):
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.telegram.telegram_send_message", fake_send)
+    assert should_send_transaction_notification(transaction)
+    asyncio.run(send_transaction_notification(transaction.id))
     assert transaction.telegram_status == "sent"
 
 

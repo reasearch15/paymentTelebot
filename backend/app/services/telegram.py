@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 CONNECTED_MESSAGE = "Payment Ledger Telegram integration is connected."
 KATHMANDU = timezone(timedelta(hours=5, minutes=45), name="Asia/Kathmandu")
+# Longer than the Telegram HTTP timeout (15s) so in-flight claims stay exclusive,
+# but short enough that crash/restart leftovers become retryable.
+TELEGRAM_SENDING_STALE_AFTER = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,71 @@ def format_kathmandu_timestamp(value: datetime) -> str:
 
 
 async def send_transaction_notification(transaction_id: int) -> None:
+    bot_token: str | None = None
+    group_id: str | None = None
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            transaction = await session.scalar(
+                select(Transaction)
+                .options(selectinload(Transaction.payment_account).selectinload(PaymentAccount.provider))
+                .where(Transaction.id == transaction_id)
+                .with_for_update()
+            )
+            if transaction is None or not should_send_transaction_notification(transaction):
+                return
+
+            integration = await get_or_create_telegram_integration(session)
+            if not integration.enabled or not integration.bot_token_encrypted or not normalize_group_id(integration.group_id):
+                return
+
+            bot_token = decrypt_secret(integration.bot_token_encrypted)
+            group_id = normalize_group_id(integration.group_id)
+            transaction.telegram_status = "sending"
+            transaction.telegram_attempted_at = datetime.now(UTC)
+            transaction.telegram_last_error = None
+
+    if bot_token is None or group_id is None:
+        return
+
+    try:
+        await telegram_send_message(bot_token, group_id, await format_transaction_message_by_id(transaction_id))
+    except Exception as exc:
+        await mark_transaction_notification_failed(transaction_id, exc, bot_token)
+        return
+
+    await mark_transaction_notification_sent(transaction_id)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def is_stale_sending_claim(transaction: Transaction, *, now: datetime | None = None) -> bool:
+    """True when a sending claim is old enough to safely retry after crash/restart."""
+    if transaction.telegram_status != "sending":
+        return False
+    attempted_at = transaction.telegram_attempted_at
+    if attempted_at is None:
+        # Pre-migration / crash without a stamp: treat as recoverable rather than stuck forever.
+        return True
+    current = now if now is not None else datetime.now(UTC)
+    return _as_utc(current) - _as_utc(attempted_at) >= TELEGRAM_SENDING_STALE_AFTER
+
+
+def should_send_transaction_notification(transaction: Transaction, *, now: datetime | None = None) -> bool:
+    if transaction.direction != Direction.IN:
+        return False
+    if transaction.telegram_status == "sent":
+        return False
+    if transaction.telegram_status == "sending":
+        return is_stale_sending_claim(transaction, now=now)
+    return True
+
+
+async def format_transaction_message_by_id(transaction_id: int) -> str:
     async with AsyncSessionLocal() as session:
         transaction = await session.scalar(
             select(Transaction)
@@ -148,14 +216,42 @@ async def send_transaction_notification(transaction_id: int) -> None:
             .where(Transaction.id == transaction_id)
         )
         if transaction is None:
-            return
-        integration = await get_or_create_telegram_integration(session)
-        await notify_transaction_in_session(transaction, integration)
-        await session.commit()
+            raise RuntimeError(f"Transaction {transaction_id} no longer exists.")
+        return format_transaction_message(transaction)
+
+
+async def mark_transaction_notification_sent(transaction_id: int) -> None:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            transaction = await session.scalar(select(Transaction).where(Transaction.id == transaction_id).with_for_update())
+            integration = await get_or_create_telegram_integration(session)
+            if transaction is None:
+                return
+            sent_at = datetime.now(UTC)
+            transaction.telegram_status = "sent"
+            transaction.telegram_sent_at = sent_at
+            transaction.telegram_last_error = None
+            integration.last_success_at = sent_at
+            integration.last_error = None
+            logger.info("Telegram sent for transaction %s", transaction.id)
+
+
+async def mark_transaction_notification_failed(transaction_id: int, exc: BaseException, bot_token: str) -> None:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            transaction = await session.scalar(select(Transaction).where(Transaction.id == transaction_id).with_for_update())
+            integration = await get_or_create_telegram_integration(session)
+            if transaction is None:
+                return
+            safe_error = sanitize_telegram_error(exc, bot_token)
+            transaction.telegram_status = "failed"
+            transaction.telegram_last_error = safe_error
+            integration.last_error = safe_error
+            logger.warning("Telegram notification failed for transaction %s: %s", transaction.id, integration.last_error)
 
 
 async def notify_transaction_in_session(transaction: Transaction, integration: TelegramIntegration) -> None:
-    if transaction.direction != Direction.IN or transaction.telegram_status == "sent":
+    if not should_send_transaction_notification(transaction):
         return
     if not integration.enabled or not integration.bot_token_encrypted or not normalize_group_id(integration.group_id):
         return
