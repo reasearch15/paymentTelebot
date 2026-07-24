@@ -22,3 +22,17 @@ class TransactionSummary(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class LedgerTotals(BaseModel):
+    total_incoming_cents: int
+    total_outgoing_cents: int
+    net_balance_cents: int
+    total_transactions: int
+
+
+class LedgerListResponse(BaseModel):
+    transactions: list[TransactionSummary]
+    totals: LedgerTotals
+    limit: int
+    offset: int

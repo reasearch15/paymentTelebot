@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.auth import require_admin
 from app.db.session import get_db
 from app.models.payment_account import PaymentAccount
-from app.models.transaction import Transaction
-from app.schemas.transaction import TransactionSummary
+from app.models.transaction import Direction, Transaction
+from app.schemas.transaction import LedgerListResponse, LedgerTotals, TransactionSummary
 
 router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_admin)])
 
@@ -35,7 +35,63 @@ def serialize_transaction(transaction: Transaction) -> TransactionSummary:
     )
 
 
-@router.get("", response_model=list[TransactionSummary])
+def apply_transaction_filters(
+    query: Select,
+    *,
+    payment_account_id: int | None,
+    provider_id: int | None,
+    direction: str | None,
+) -> Select:
+    if payment_account_id is not None:
+        query = query.where(Transaction.payment_account_id == payment_account_id)
+    if provider_id is not None:
+        query = query.where(PaymentAccount.provider_id == provider_id)
+    if direction is not None:
+        query = query.where(Transaction.direction == direction)
+    return query
+
+
+async def compute_ledger_totals(
+    db: AsyncSession,
+    *,
+    payment_account_id: int | None = None,
+    provider_id: int | None = None,
+    direction: str | None = None,
+) -> LedgerTotals:
+    query = (
+        select(
+            func.count(Transaction.id),
+            func.coalesce(
+                func.sum(case((Transaction.direction == Direction.IN, Transaction.amount_cents), else_=0)),
+                0,
+            ),
+            func.coalesce(
+                func.sum(case((Transaction.direction == Direction.OUT, Transaction.amount_cents), else_=0)),
+                0,
+            ),
+        )
+        .select_from(Transaction)
+        .join(Transaction.payment_account)
+        .join(PaymentAccount.provider)
+    )
+    query = apply_transaction_filters(
+        query,
+        payment_account_id=payment_account_id,
+        provider_id=provider_id,
+        direction=direction,
+    )
+    total_transactions, total_incoming_cents, total_outgoing_cents = (await db.execute(query)).one()
+    incoming = int(total_incoming_cents)
+    outgoing = int(total_outgoing_cents)
+    return LedgerTotals(
+        total_incoming_cents=incoming,
+        total_outgoing_cents=outgoing,
+        net_balance_cents=incoming - outgoing,
+        total_transactions=int(total_transactions),
+    )
+
+
+@router.get("", response_model=LedgerListResponse)
 async def list_transactions(
     payment_account_id: int | None = None,
     provider_id: int | None = None,
@@ -43,7 +99,7 @@ async def list_transactions(
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
-) -> list[TransactionSummary]:
+) -> LedgerListResponse:
     query = (
         select(Transaction)
         .join(Transaction.payment_account)
@@ -53,12 +109,18 @@ async def list_transactions(
         .limit(limit)
         .offset(offset)
     )
-    if payment_account_id is not None:
-        query = query.where(Transaction.payment_account_id == payment_account_id)
-    if provider_id is not None:
-        query = query.where(PaymentAccount.provider_id == provider_id)
-    if direction is not None:
-        query = query.where(Transaction.direction == direction)
-
+    query = apply_transaction_filters(
+        query,
+        payment_account_id=payment_account_id,
+        provider_id=provider_id,
+        direction=direction,
+    )
     result = await db.execute(query)
-    return [serialize_transaction(row) for row in result.scalars().all()]
+    transactions = [serialize_transaction(row) for row in result.scalars().all()]
+    totals = await compute_ledger_totals(
+        db,
+        payment_account_id=payment_account_id,
+        provider_id=provider_id,
+        direction=direction,
+    )
+    return LedgerListResponse(transactions=transactions, totals=totals, limit=limit, offset=offset)

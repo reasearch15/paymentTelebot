@@ -207,6 +207,10 @@ select {
   grid-template-columns: repeat(5, minmax(160px, 1fr));
 }
 
+.metric-grid.ledger-totals {
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+}
+
 .metric-card,
 .empty-state,
 .table-shell {

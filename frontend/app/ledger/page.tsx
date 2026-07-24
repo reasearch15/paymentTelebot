@@ -3,7 +3,7 @@ import { LedgerBrowser } from "@/components/LedgerBrowser";
 
 export default function LedgerPage() {
   return (
-    <AdminShell title="Ledger" description="Parsed payment transactions from captured emails.">
+    <AdminShell title="Ledger" description="Financial transactions, balances, and running totals.">
       <LedgerBrowser />
     </AdminShell>
   );

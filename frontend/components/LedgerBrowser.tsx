@@ -6,7 +6,6 @@ import { apiRequest } from "@/lib/api";
 type LedgerTransaction = {
   id: number;
   payment_account_id: number;
-  provider_name: string;
   friendly_name: string;
   direction: string;
   amount_cents: number;
@@ -15,6 +14,20 @@ type LedgerTransaction = {
   provider_reference: string | null;
   received_at: string;
   telegram_status: string;
+};
+
+type LedgerTotals = {
+  total_incoming_cents: number;
+  total_outgoing_cents: number;
+  net_balance_cents: number;
+  total_transactions: number;
+};
+
+type LedgerResponse = {
+  transactions: LedgerTransaction[];
+  totals: LedgerTotals;
+  limit: number;
+  offset: number;
 };
 
 function formatDate(value: string) {
@@ -30,19 +43,21 @@ function formatMoney(cents: number) {
 
 export function LedgerBrowser() {
   const [transactions, setTransactions] = useState<LedgerTransaction[]>([]);
+  const [totals, setTotals] = useState<LedgerTotals | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadTransactions() {
+    async function loadLedger() {
       setIsLoading(true);
       setError(null);
       try {
-        const data = await apiRequest<LedgerTransaction[]>("/transactions?limit=100");
+        const data = await apiRequest<LedgerResponse>("/transactions?limit=100");
         if (!cancelled) {
-          setTransactions(data);
+          setTransactions(data.transactions);
+          setTotals(data.totals);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -55,20 +70,52 @@ export function LedgerBrowser() {
       }
     }
 
-    void loadTransactions();
+    void loadLedger();
     return () => {
       cancelled = true;
     };
   }, []);
 
+  const summaryCards = totals
+    ? [
+        { label: "Total Incoming", value: formatMoney(totals.total_incoming_cents), note: "All IN transactions" },
+        { label: "Total Outgoing", value: formatMoney(totals.total_outgoing_cents), note: "All OUT transactions" },
+        { label: "Net Balance", value: formatMoney(totals.net_balance_cents), note: "Incoming minus outgoing" },
+        {
+          label: "Total Transactions",
+          value: totals.total_transactions.toString(),
+          note: "Each payment kept as its own row",
+        },
+      ]
+    : [];
+
   return (
     <div className="integrations-stack">
       {error ? <div className="alert-message">{error}</div> : null}
+
+      <section className="metric-grid ledger-totals" aria-label="Ledger totals">
+        {isLoading && !totals ? (
+          <article className="metric-card">
+            <p className="metric-label">Totals</p>
+            <p className="metric-value">…</p>
+            <p className="metric-note">Loading ledger totals</p>
+          </article>
+        ) : (
+          summaryCards.map((metric) => (
+            <article className="metric-card" key={metric.label}>
+              <p className="metric-label">{metric.label}</p>
+              <p className="metric-value">{metric.value}</p>
+              <p className="metric-note">{metric.note}</p>
+            </article>
+          ))
+        )}
+      </section>
+
       <section className="table-shell">
         <table className="placeholder-table">
           <thead>
             <tr>
-              <th>Received</th>
+              <th>Date/Time</th>
               <th>Account</th>
               <th>Direction</th>
               <th>Amount</th>
