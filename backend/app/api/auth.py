@@ -24,7 +24,12 @@ async def require_admin(request: Request, db: AsyncSession = Depends(get_db)) ->
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)) -> LoginResponse:
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> LoginResponse:
     email = await authenticate_admin(db, payload.email, payload.password)
     if email is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
@@ -33,7 +38,7 @@ async def login(payload: LoginRequest, response: Response, db: AsyncSession = De
         key=settings.session_cookie_name,
         value=create_session_token(email),
         httponly=True,
-        secure=False,
+        secure=is_secure_request(request),
         samesite="lax",
         max_age=settings.session_max_age_seconds,
         path="/",
@@ -47,6 +52,11 @@ async def me(email: str = Depends(require_admin)) -> AdminProfile:
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
-    response.delete_cookie(key=settings.session_cookie_name, path="/")
+async def logout(request: Request, response: Response) -> dict[str, str]:
+    response.delete_cookie(key=settings.session_cookie_name, path="/", secure=is_secure_request(request), samesite="lax")
     return {"status": "ok"}
+
+
+def is_secure_request(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return forwarded_proto == "https" or request.url.scheme == "https"
