@@ -95,7 +95,11 @@ async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> Par
         email.parsed_at = datetime.now(UTC)
         email.processing_status = parser_result_status(result)
         email.processing_error = None
-        if email.processing_status == ProcessingStatus.FAILED:
+        if email.processing_status == ProcessingStatus.PARSED and transaction is None:
+            # Parsed means the payment pipeline produced a durable ledger row.
+            email.processing_status = ProcessingStatus.FAILED
+            email.processing_error = "Parser completed a payment but no ledger transaction was created."
+        elif email.processing_status == ProcessingStatus.FAILED:
             email.processing_error = "Parser result missing required fields: " + ", ".join(result.missing_fields)
         elif email.processing_status == ProcessingStatus.IGNORED:
             logger.info("Skipped %s email %s: %s", result.parser_key, email.id, result.classification)
