@@ -189,6 +189,9 @@ def test_chime_debit_card_activation_is_unknown() -> None:
 
 def test_parser_failure_isolation(monkeypatch) -> None:
     class BrokenParser:
+        parser_key = "broken"
+        parser_version = "0.0.0"
+
         def parse(self, _parser_input):
             raise RuntimeError("boom with no credentials")
 

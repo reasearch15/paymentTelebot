@@ -18,6 +18,7 @@ from app.parsers.extraction import (
     normalize_whitespace,
 )
 from app.parsers.registry import get_parser
+from app.services.chime_email_auth import validate_chime_email_authenticity
 from app.services.ledger import create_transaction_from_parser_result
 from app.services.telegram import send_transaction_notification
 
@@ -75,10 +76,73 @@ def parser_result_status(result: ParserResult) -> ProcessingStatus:
     return ProcessingStatus.IGNORED
 
 
+def _auth_rejected_parser_result(parser_key: str, parser_version: str, reason: str) -> ParserResult:
+    return ParserResult(
+        classification="unknown",
+        is_payment=False,
+        direction=None,
+        amount_cents=None,
+        sender_name=None,
+        sender_payment_tag=None,
+        receiver_tag=None,
+        payment_timestamp=None,
+        provider_reference=None,
+        confidence=0.0,
+        missing_fields=[],
+        parser_key=parser_key,
+        parser_version=parser_version,
+        debug_evidence={"email_auth_rejected": reason},
+    )
+
+
+async def _mark_chime_auth_rejected(
+    session: AsyncSession,
+    email: PaymentEmail,
+    *,
+    parser_key: str,
+    parser_version: str,
+    reason: str,
+) -> ParserResult:
+    result = _auth_rejected_parser_result(parser_key, parser_version, reason)
+    email.parser_key = parser_key
+    email.parser_version = parser_version
+    email.parsed_payload_json = result.to_json()
+    email.parsed_at = datetime.now(UTC)
+    email.processing_status = ProcessingStatus.IGNORED
+    email.processing_error = f"email_auth_rejected:{reason}"
+    await session.commit()
+    logger.info(
+        "Skipped chime email %s: authenticity rejected reason=%s",
+        email.id,
+        reason,
+    )
+    return result
+
+
 async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> ParserResult:
     try:
         parser = get_parser(email.payment_account.provider.parser_key)
-        result = parser.parse(build_parser_input(email))
+        parser_input = build_parser_input(email)
+
+        # Fail-closed Chime authenticity gate before amount/name parsing can create a transaction.
+        if parser.parser_key == "chime":
+            auth = validate_chime_email_authenticity(
+                parser_input.headers,
+                subject=parser_input.subject,
+                raw_text=parser_input.raw_text,
+                html_visible_text=parser_input.html_visible_text,
+                sender_address=parser_input.sender_address,
+            )
+            if not auth.accepted:
+                return await _mark_chime_auth_rejected(
+                    session,
+                    email,
+                    parser_key=parser.parser_key,
+                    parser_version=parser.parser_version,
+                    reason=auth.reason,
+                )
+
+        result = parser.parse(parser_input)
         if result.parser_key == "chime":
             logger.info("Chime email detected for account %s", email.payment_account_id)
         logger.info(

@@ -6,6 +6,7 @@ from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 
+# Single-value headers retained for display / parsing.
 SAFE_HEADERS = (
     "Message-ID",
     "From",
@@ -17,6 +18,23 @@ SAFE_HEADERS = (
     "Delivered-To",
 )
 
+# Multi-value / security headers. All occurrences are preserved (list when >1).
+SECURITY_HEADERS = (
+    "Authentication-Results",
+    "ARC-Authentication-Results",
+    "Received-SPF",
+    "DKIM-Signature",
+    "Resent-From",
+    "Resent-Sender",
+    "Resent-To",
+    "Resent-Date",
+    "Resent-Message-ID",
+    "X-Forwarded-For",
+    "X-Forwarded-To",
+    "X-Forwarded-By",
+    "X-Forwarded-Return-Path",
+)
+
 
 @dataclass(frozen=True)
 class ExtractedEmail:
@@ -26,7 +44,7 @@ class ExtractedEmail:
     received_at: datetime | None
     raw_text: str | None
     raw_html: str | None
-    raw_headers_json: dict[str, str]
+    raw_headers_json: dict[str, str | list[str]]
 
 
 def decode_mime_header(value: str | None) -> str | None:
@@ -52,6 +70,35 @@ def append_body(existing: str | None, value: str | None) -> str | None:
     if not value:
         return existing
     return f"{existing}\n\n{value}" if existing else value
+
+
+def _collect_header_values(message: EmailMessage, header_name: str) -> list[str]:
+    values: list[str] = []
+    for raw in message.get_all(header_name, []) or []:
+        decoded = decode_mime_header(raw if isinstance(raw, str) else str(raw))
+        if decoded:
+            values.append(decoded)
+    return values
+
+
+def extract_headers(message: EmailMessage) -> dict[str, str | list[str]]:
+    headers: dict[str, str | list[str]] = {}
+    for header in SAFE_HEADERS:
+        values = _collect_header_values(message, header)
+        if not values:
+            continue
+        headers[header] = values[0] if len(values) == 1 else values
+
+    for header in SECURITY_HEADERS:
+        values = _collect_header_values(message, header)
+        if not values:
+            continue
+        # Always keep Authentication-Results / ARC as lists so ordering is explicit.
+        if header in {"Authentication-Results", "ARC-Authentication-Results"} or len(values) > 1:
+            headers[header] = values
+        else:
+            headers[header] = values[0]
+    return headers
 
 
 def extract_email(raw_message: bytes) -> ExtractedEmail:
@@ -84,11 +131,7 @@ def extract_email(raw_message: bytes) -> ExtractedEmail:
         except (TypeError, ValueError):
             received_at = None
 
-    headers = {
-        header: decoded
-        for header in SAFE_HEADERS
-        if (decoded := decode_mime_header(message.get(header))) is not None
-    }
+    headers = extract_headers(message)
 
     return ExtractedEmail(
         gmail_message_id=decode_mime_header(message.get("Message-ID")),
