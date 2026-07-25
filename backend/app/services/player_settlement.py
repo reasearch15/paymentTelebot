@@ -259,6 +259,15 @@ async def get_player_ledger_detail(session: AsyncSession, *, sender_name: str) -
     }
 
 
+async def get_player_unsettled_balance_cents(session: AsyncSession, *, sender_name: str) -> int:
+    identity = normalize_sender_identity(sender_name)
+    if not identity:
+        return 0
+    rows = await list_player_ledger_rows(session, search=None)
+    summary = next((row for row in rows if row["sender_name"] == identity), None)
+    return int(summary["unsettled_balance_cents"]) if summary else 0
+
+
 async def create_player_settlement(
     session: AsyncSession,
     *,
@@ -285,6 +294,15 @@ async def create_player_settlement(
     )
     if account is None:
         raise LookupError("Payment account not found.")
+
+    unsettled = await get_player_unsettled_balance_cents(session, sender_name=identity)
+    if direction == PlayerSettlementDirection.PAID_TO_PLAYER:
+        if unsettled <= 0:
+            raise ValueError("Player has no positive unsettled balance to pay.")
+        if amount_cents > unsettled:
+            raise ValueError(
+                f"Settlement amount exceeds unsettled balance of ${unsettled / 100:,.2f}."
+            )
 
     settlement = PlayerSettlement(
         sender_name=identity,

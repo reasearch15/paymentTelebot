@@ -359,6 +359,12 @@ select {
   text-decoration: underline;
 }
 
+.compact-button {
+  min-height: 34px;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+
 .detail-panel,
 .panel-card {
   background: var(--surface);

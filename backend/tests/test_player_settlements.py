@@ -66,6 +66,20 @@ def test_player_unsettled_after_received_from_player() -> None:
     assert after_received == 17_500
 
 
+def test_paid_to_player_rejects_amount_over_positive_unsettled() -> None:
+    unsettled = compute_player_unsettled_balance_cents(
+        total_in_cents=50_000,
+        total_out_cents=15_000,
+        settlements_paid_cents=0,
+        settlements_received_cents=0,
+    )
+    assert unsettled == 35_000
+    amount_cents = 40_000
+    assert amount_cents > unsettled
+    message = f"Settlement amount exceeds unsettled balance of ${unsettled / 100:,.2f}."
+    assert message == "Settlement amount exceeds unsettled balance of $350.00."
+
+
 def test_player_balances_independent_per_sender() -> None:
     amy = compute_player_unsettled_balance_cents(
         total_in_cents=50_000,
