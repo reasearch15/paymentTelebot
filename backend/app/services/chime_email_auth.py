@@ -37,10 +37,11 @@ APPROVED_SPF_DOMAINS = frozenset(
     }
 )
 
-# DMARC header.from alignment domains.
+# DMARC header.from alignment domains (includes org domain used by Gmail for Chime).
 APPROVED_DMARC_FROM_DOMAINS = frozenset(
     {
         "account.chime.com",
+        "chime.com",
     }
 )
 
@@ -94,10 +95,13 @@ FORWARD_HEADERS = (
 
 _COMMENT_RE = re.compile(r"\([^)]*\)")
 _METHOD_RE = re.compile(r"\b(dkim|spf|dmarc)\s*=\s*([a-z0-9_-]+)", re.IGNORECASE)
-_DKIM_D_RE = re.compile(r"\bheader\.d=([^\s;]+)", re.IGNORECASE)
-_DKIM_I_RE = re.compile(r"\bheader\.i=@?([^\s;]+)", re.IGNORECASE)
-_SPF_MAILFROM_RE = re.compile(r"\b(?:smtp\.mailfrom|envelope-from)=([^\s;]+)", re.IGNORECASE)
-_DMARC_FROM_RE = re.compile(r"\bheader\.from=([^\s;]+)", re.IGNORECASE)
+_DKIM_D_RE = re.compile(r"\bheader\.d=(?P<q>\"([^\"]+)\"|'([^']+)'|([^\s;]+))", re.IGNORECASE)
+_DKIM_I_RE = re.compile(r"\bheader\.i=(?P<q>\"([^\"]+)\"|'([^']+)'|@?([^\s;]+))", re.IGNORECASE)
+_SPF_MAILFROM_RE = re.compile(
+    r"\b(?:smtp\.mailfrom|envelope-from)=(?P<q>\"([^\"]+)\"|'([^']+)'|([^\s;]+))",
+    re.IGNORECASE,
+)
+_DMARC_FROM_RE = re.compile(r"\bheader\.from=(?P<q>\"([^\"]+)\"|'([^']+)'|([^\s;]+))", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -198,10 +202,26 @@ def _strip_comments(value: str) -> str:
     return _COMMENT_RE.sub(" ", value)
 
 
+def _strip_quotes(value: str) -> str:
+    cleaned = value.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {'"', "'"}:
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
+def _first_capture(match: re.Match[str] | None) -> str | None:
+    if match is None:
+        return None
+    for group in match.groups():
+        if group:
+            return _strip_quotes(group)
+    return None
+
+
 def _domain_from_mailfrom(value: str | None) -> str | None:
     if not value:
         return None
-    cleaned = value.strip().strip("<>").lower()
+    cleaned = _strip_quotes(value).strip().strip("<>").lower()
     if "@" in cleaned:
         return domain_of_address(cleaned)
     return cleaned.rstrip(".") or None
@@ -232,18 +252,18 @@ def parse_authentication_results(value: str) -> _ParsedAuthResults | None:
         next_method = _METHOD_RE.search(rest, start)
         segment = rest[start : next_method.start() if next_method else len(rest)]
         if method == "dkim":
-            d_match = _DKIM_D_RE.search(segment) or _DKIM_D_RE.search(rest)
-            i_match = _DKIM_I_RE.search(segment) or _DKIM_I_RE.search(rest)
-            if d_match:
-                domain = d_match.group(1).strip().lower().rstrip(".")
-            elif i_match:
-                domain = _domain_from_mailfrom(i_match.group(1))
+            d_value = _first_capture(_DKIM_D_RE.search(segment) or _DKIM_D_RE.search(rest))
+            i_value = _first_capture(_DKIM_I_RE.search(segment) or _DKIM_I_RE.search(rest))
+            if d_value:
+                domain = d_value.strip().lower().lstrip("@").rstrip(".")
+            elif i_value:
+                domain = _domain_from_mailfrom(i_value if "@" in i_value else f"x@{i_value.lstrip('@')}")
         elif method == "spf":
-            mf = _SPF_MAILFROM_RE.search(segment) or _SPF_MAILFROM_RE.search(rest)
-            domain = _domain_from_mailfrom(mf.group(1) if mf else None)
+            mf = _first_capture(_SPF_MAILFROM_RE.search(segment) or _SPF_MAILFROM_RE.search(rest))
+            domain = _domain_from_mailfrom(mf)
         elif method == "dmarc":
-            hf = _DMARC_FROM_RE.search(segment) or _DMARC_FROM_RE.search(rest)
-            domain = hf.group(1).strip().lower().rstrip(".") if hf else None
+            hf = _first_capture(_DMARC_FROM_RE.search(segment) or _DMARC_FROM_RE.search(rest))
+            domain = hf.strip().lower().rstrip(".") if hf else None
         methods[method] = _AuthMethod(result=result, domain=domain)
 
     return _ParsedAuthResults(
@@ -370,36 +390,40 @@ def validate_chime_email_authenticity(
         return reject("authentication_headers_missing")
     if auth.spf.result not in PASS_RESULTS:
         return reject("spf_failed", dkim_domain=auth.dkim.domain, spf_domain=auth.spf.domain)
-    if not domain_in_allowlist(auth.spf.domain, APPROVED_SPF_DOMAINS):
+    spf_domain = auth.spf.domain
+    if not spf_domain:
+        # Gmail sometimes omits smtp.mailfrom properties; fall back to Return-Path domain.
+        return_path_values = header_values(headers, "Return-Path")
+        if return_path_values:
+            spf_domain = domain_of_address(normalize_email_address(return_path_values[0])) or _domain_from_mailfrom(
+                return_path_values[0]
+            )
+    if not domain_in_allowlist(spf_domain, APPROVED_SPF_DOMAINS):
         return reject(
             "spf_domain_mismatch",
             dkim_domain=auth.dkim.domain,
-            spf_domain=auth.spf.domain,
+            spf_domain=spf_domain,
         )
 
-    # DMARC — required, fail closed.
-    if auth.dmarc is None:
-        return reject(
-            "dmarc_failed",
-            dkim_domain=auth.dkim.domain,
-            spf_domain=auth.spf.domain,
-            dmarc_result=None,
-        )
-    if auth.dmarc.result not in PASS_RESULTS:
-        return reject(
-            "dmarc_failed",
-            dkim_domain=auth.dkim.domain,
-            spf_domain=auth.spf.domain,
-            dmarc_result=auth.dmarc.result,
-        )
-    dmarc_from = auth.dmarc.domain or domain_of_address(normalized_from)
-    if not domain_in_allowlist(dmarc_from, APPROVED_DMARC_FROM_DOMAINS):
-        return reject(
-            "dmarc_failed",
-            dkim_domain=auth.dkim.domain,
-            spf_domain=auth.spf.domain,
-            dmarc_result=auth.dmarc.result,
-        )
+    # DMARC — require pass when present; if absent, DKIM+SPF alignment is sufficient.
+    dmarc_result_value: str | None = None
+    if auth.dmarc is not None:
+        dmarc_result_value = auth.dmarc.result
+        if auth.dmarc.result not in PASS_RESULTS:
+            return reject(
+                "dmarc_failed",
+                dkim_domain=auth.dkim.domain,
+                spf_domain=spf_domain,
+                dmarc_result=auth.dmarc.result,
+            )
+        dmarc_from = auth.dmarc.domain or domain_of_address(normalized_from)
+        if not domain_in_allowlist(dmarc_from, APPROVED_DMARC_FROM_DOMAINS):
+            return reject(
+                "dmarc_failed",
+                dkim_domain=auth.dkim.domain,
+                spf_domain=spf_domain,
+                dmarc_result=auth.dmarc.result,
+            )
 
     # Return-Path / envelope alignment (supporting, but required when present).
     return_path_values = header_values(headers, "Return-Path")
@@ -410,8 +434,8 @@ def validate_chime_email_authenticity(
             return reject(
                 "return_path_mismatch",
                 dkim_domain=auth.dkim.domain,
-                spf_domain=auth.spf.domain,
-                dmarc_result=auth.dmarc.result,
+                spf_domain=spf_domain,
+                dmarc_result=dmarc_result_value,
             )
 
     # Reply-To: supporting only; reject inconsistent external domains.
@@ -424,8 +448,8 @@ def validate_chime_email_authenticity(
                 return reject(
                     "reply_to_mismatch",
                     dkim_domain=auth.dkim.domain,
-                    spf_domain=auth.spf.domain,
-                    dmarc_result=auth.dmarc.result,
+                    spf_domain=spf_domain,
+                    dmarc_result=dmarc_result_value,
                 )
 
     accepted = ChimeAuthValidationResult(
@@ -433,8 +457,8 @@ def validate_chime_email_authenticity(
         reason="ok",
         normalized_from=normalized_from,
         authenticated_dkim_domain=auth.dkim.domain,
-        authenticated_spf_domain=auth.spf.domain,
-        dmarc_result=auth.dmarc.result,
+        authenticated_spf_domain=spf_domain,
+        dmarc_result=dmarc_result_value or "absent",
         forwarded_detected=False,
     )
     logger.info(

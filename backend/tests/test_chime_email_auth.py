@@ -280,8 +280,8 @@ def test_auth_rejected_email_remains_visible_without_transaction_or_telegram(mon
     result = asyncio.run(payment_email_parser.parse_payment_email(FakeSession(), email))
 
     assert result.is_payment is False
-    assert email.processing_status == ProcessingStatus.IGNORED
-    assert email.processing_error == "email_auth_rejected:authentication_headers_missing"
+    assert email.processing_status == ProcessingStatus.FAILED
+    assert email.processing_error == "rejected:authentication_headers_missing"
     assert create_calls == []
     assert telegram_calls == []
     # Captured email record remains (same object, still addressable).
@@ -372,3 +372,210 @@ def test_return_path_mismatch_rejected() -> None:
     )
     assert result.accepted is False
     assert result.reason == "return_path_mismatch"
+
+
+# Sanitized Authentication-Results from production email id=4416 (Amy F., 2026-07-25).
+PROD_AMY_F_GMAIL_AUTH = (
+    "mx.google.com;       "
+    "dkim=pass header.i=@account.chime.com header.s=s1 header.b=AXeNmcRs;       "
+    'dkim=pass header.i=@sendgrid.info header.s=smtpapi header.b="FOzE/Nie";       '
+    "spf=pass (google.com: domain of bounces+16002407-0b20-larryhearn02=gmail.com@em.account.chime.com "
+    "designates 149.72.78.197 as permitted sender) "
+    'smtp.mailfrom="bounces+16002407-0b20-larryhearn02=gmail.com@em.account.chime.com";       '
+    "dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=chime.com"
+)
+
+
+def prod_amy_f_headers() -> dict:
+    return {
+        "From": "Chime <alerts@account.chime.com>",
+        "Reply-To": "noreply@chime.com",
+        "Return-Path": "<bounces+16002407-0b20-larryhearn02=gmail.com@em.account.chime.com>",
+        "Delivered-To": "larryhearn02@gmail.com",
+        "Subject": "Amy F. just sent you money  💸",
+        "Message-ID": "<sanitized@account.chime.com>",
+        "Authentication-Results": [PROD_AMY_F_GMAIL_AUTH],
+        "Received-SPF": (
+            "pass (google.com: domain of bounces+16002407-0b20-larryhearn02=gmail.com@em.account.chime.com "
+            "designates 149.72.78.197 as permitted sender) client-ip=149.72.78.197;"
+        ),
+    }
+
+
+def test_production_amy_f_headers_are_accepted() -> None:
+    result = validate_chime_email_authenticity(
+        prod_amy_f_headers(),
+        subject="Amy F. just sent you money  💸",
+        raw_text="You received $5.00 from Amy F. The funds are in your Chime account.",
+        sender_address="Chime <alerts@account.chime.com>",
+    )
+    assert result.accepted is True
+    assert result.authenticated_dkim_domain == "account.chime.com"
+    assert result.authenticated_spf_domain == "em.account.chime.com"
+    assert result.dmarc_result == "pass"
+
+
+def test_quoted_smtp_mailfrom_does_not_break_spf_domain() -> None:
+    from app.services.chime_email_auth import parse_authentication_results
+
+    parsed = parse_authentication_results(PROD_AMY_F_GMAIL_AUTH)
+    assert parsed is not None
+    assert parsed.spf is not None
+    assert parsed.spf.domain == "em.account.chime.com"
+    assert not parsed.spf.domain.endswith('"')
+
+
+def test_dmarc_absent_still_accepted_when_dkim_and_spf_pass() -> None:
+    auth = (
+        "mx.google.com; "
+        "dkim=pass header.d=account.chime.com; "
+        "spf=pass smtp.mailfrom=bounce@em.account.chime.com"
+    )
+    result = validate_chime_email_authenticity(
+        genuine_headers(**{"Authentication-Results": [auth]})
+    )
+    assert result.accepted is True
+    assert result.dmarc_result == "absent"
+
+
+def test_production_amy_f_parses_into_transaction(monkeypatch) -> None:
+    create_calls: list[object] = []
+    telegram_calls: list[int] = []
+
+    class FakeTx:
+        def __init__(self) -> None:
+            self.id = 901
+
+    async def fake_create(session, email, result):
+        create_calls.append(result)
+        assert result.is_payment is True
+        assert result.amount_cents == 500
+        assert result.sender_name == "Amy F."
+        return FakeTx()
+
+    async def fake_telegram(transaction_id: int):
+        telegram_calls.append(transaction_id)
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    email = SimpleNamespace(
+        id=4416,
+        payment_account=SimpleNamespace(
+            friendly_name="Larry",
+            provider=SimpleNamespace(parser_key="chime", name="Chime"),
+        ),
+        subject="Amy F. just sent you money  💸",
+        raw_text="You received $5.00 from Amy F. The funds are in your Chime account and available for immediate use.",
+        raw_html="<p>You received $5.00 from Amy F.</p>",
+        raw_headers_json=prod_amy_f_headers(),
+        received_at=datetime(2026, 7, 25, 2, 49, 15, tzinfo=UTC),
+        sender_address="Chime <alerts@account.chime.com>",
+        gmail_message_id="<sanitized@account.chime.com>",
+        payment_account_id=1,
+        processing_status=ProcessingStatus.CAPTURED,
+        processing_error=None,
+        parsed_at=None,
+        parser_key=None,
+        parser_version=None,
+        parsed_payload_json=None,
+    )
+
+    monkeypatch.setattr(payment_email_parser, "create_transaction_from_parser_result", fake_create)
+    monkeypatch.setattr(payment_email_parser, "send_transaction_notification", fake_telegram)
+
+    result = asyncio.run(payment_email_parser.parse_payment_email(FakeSession(), email))
+
+    assert result.classification == "incoming_payment"
+    assert result.amount_cents == 500
+    assert result.sender_name == "Amy F."
+    assert email.processing_status == ProcessingStatus.PARSED
+    assert email.processing_error is None
+    assert len(create_calls) == 1
+    assert telegram_calls == [901]
+
+
+def test_unrelated_chime_security_email_is_ignored_with_reason(monkeypatch) -> None:
+    async def fake_create(session, email, result):
+        return None
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    email = SimpleNamespace(
+        id=7,
+        payment_account=SimpleNamespace(
+            friendly_name="Larry",
+            provider=SimpleNamespace(parser_key="chime", name="Chime"),
+        ),
+        subject="You’ve activated your Chime Debit card.",
+        raw_text="Your card is ready to use.",
+        raw_html="",
+        raw_headers_json=genuine_headers(Subject="You’ve activated your Chime Debit card."),
+        received_at=datetime(2026, 7, 25, 1, 0, tzinfo=UTC),
+        sender_address="Chime <alerts@account.chime.com>",
+        gmail_message_id="<sec@account.chime.com>",
+        payment_account_id=1,
+        processing_status=ProcessingStatus.CAPTURED,
+        processing_error=None,
+        parsed_at=None,
+        parser_key=None,
+        parser_version=None,
+        parsed_payload_json=None,
+    )
+    monkeypatch.setattr(payment_email_parser, "create_transaction_from_parser_result", fake_create)
+
+    async def noop(_id=None):
+        return None
+
+    monkeypatch.setattr(payment_email_parser, "send_transaction_notification", noop)
+
+    result = asyncio.run(payment_email_parser.parse_payment_email(FakeSession(), email))
+    assert result.is_payment is False
+    assert email.processing_status == ProcessingStatus.IGNORED
+    assert email.processing_error == "ignored:not_payment_email:unknown"
+
+
+def test_missing_amount_becomes_parse_failed(monkeypatch) -> None:
+    async def fake_create(session, email, result):
+        # Ledger refuses incomplete payments.
+        return None
+
+    async def noop(_id=None):
+        return None
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    email = SimpleNamespace(
+        id=8,
+        payment_account=SimpleNamespace(
+            friendly_name="Larry",
+            provider=SimpleNamespace(parser_key="chime", name="Chime"),
+        ),
+        subject="Amy F. just sent you money 💸",
+        raw_text="Amy F. just sent you money. The funds are in your Chime account.",
+        raw_html="",
+        raw_headers_json=genuine_headers(Subject="Amy F. just sent you money 💸"),
+        received_at=datetime(2026, 7, 25, 1, 0, tzinfo=UTC),
+        sender_address="Chime <alerts@account.chime.com>",
+        gmail_message_id="<amt@account.chime.com>",
+        payment_account_id=1,
+        processing_status=ProcessingStatus.CAPTURED,
+        processing_error=None,
+        parsed_at=None,
+        parser_key=None,
+        parser_version=None,
+        parsed_payload_json=None,
+    )
+    monkeypatch.setattr(payment_email_parser, "create_transaction_from_parser_result", fake_create)
+    monkeypatch.setattr(payment_email_parser, "send_transaction_notification", noop)
+
+    result = asyncio.run(payment_email_parser.parse_payment_email(FakeSession(), email))
+    assert result.is_payment is True
+    assert "amount_cents" in result.missing_fields
+    assert email.processing_status == ProcessingStatus.FAILED
+    assert email.processing_error == "parse_failed:amount_cents_missing"

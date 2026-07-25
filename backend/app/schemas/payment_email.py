@@ -18,6 +18,7 @@ class PaymentEmailSummary(BaseModel):
     subject: str | None
     received_at: datetime | None
     processing_status: ProcessingStatus
+    processing_error: str | None = None
     parser_key: str | None
     parser_version: str | None
     created_at: datetime
@@ -30,7 +31,6 @@ class PaymentEmailDetail(PaymentEmailSummary):
     raw_headers_json: dict | None
     parsed_payload_json: dict | None
     parsed_at: datetime | None
-    processing_error: str | None
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

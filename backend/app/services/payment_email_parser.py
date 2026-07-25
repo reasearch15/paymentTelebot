@@ -76,6 +76,20 @@ def parser_result_status(result: ParserResult) -> ProcessingStatus:
     return ProcessingStatus.IGNORED
 
 
+def format_ignored_reason(classification: str) -> str:
+    if classification in {"payment_request", "unknown"}:
+        return f"ignored:not_payment_email:{classification}"
+    return f"ignored:{classification}"
+
+
+def format_parse_failed_reason(missing_fields: list[str]) -> str:
+    if not missing_fields:
+        return "parse_failed:unknown"
+    if len(missing_fields) == 1:
+        return f"parse_failed:{missing_fields[0]}_missing"
+    return "parse_failed:" + ",".join(f"{field}_missing" for field in missing_fields)
+
+
 def _auth_rejected_parser_result(parser_key: str, parser_version: str, reason: str) -> ParserResult:
     return ParserResult(
         classification="unknown",
@@ -108,11 +122,12 @@ async def _mark_chime_auth_rejected(
     email.parser_version = parser_version
     email.parsed_payload_json = result.to_json()
     email.parsed_at = datetime.now(UTC)
-    email.processing_status = ProcessingStatus.IGNORED
-    email.processing_error = f"email_auth_rejected:{reason}"
+    # Auth failures are rejections, not benign ignores.
+    email.processing_status = ProcessingStatus.FAILED
+    email.processing_error = f"rejected:{reason}"
     await session.commit()
     logger.info(
-        "Skipped chime email %s: authenticity rejected reason=%s",
+        "Rejected chime email %s: authenticity rejected reason=%s",
         email.id,
         reason,
     )
@@ -162,10 +177,11 @@ async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> Par
         if email.processing_status == ProcessingStatus.PARSED and transaction is None:
             # Parsed means the payment pipeline produced a durable ledger row.
             email.processing_status = ProcessingStatus.FAILED
-            email.processing_error = "Parser completed a payment but no ledger transaction was created."
+            email.processing_error = "parse_failed:transaction_not_created"
         elif email.processing_status == ProcessingStatus.FAILED:
-            email.processing_error = "Parser result missing required fields: " + ", ".join(result.missing_fields)
+            email.processing_error = format_parse_failed_reason(result.missing_fields)
         elif email.processing_status == ProcessingStatus.IGNORED:
+            email.processing_error = format_ignored_reason(result.classification)
             logger.info("Skipped %s email %s: %s", result.parser_key, email.id, result.classification)
         await session.commit()
         if transaction is not None and result.classification == "incoming_payment":
@@ -173,7 +189,7 @@ async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> Par
         return result
     except Exception as exc:
         email.processing_status = ProcessingStatus.FAILED
-        email.processing_error = safe_parser_error(exc)
+        email.processing_error = f"parse_failed:{safe_parser_error(exc)}"
         email.parsed_at = datetime.now(UTC)
         await session.commit()
         raise

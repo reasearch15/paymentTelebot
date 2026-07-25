@@ -36,6 +36,7 @@ def serialize_summary(email: PaymentEmail) -> PaymentEmailSummary:
         subject=email.subject,
         received_at=email.received_at,
         processing_status=email.processing_status,
+        processing_error=email.processing_error,
         parser_key=email.parser_key,
         parser_version=email.parser_version,
         created_at=email.created_at,

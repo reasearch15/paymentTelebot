@@ -29,6 +29,7 @@ type EmailSummary = {
   subject: string | null;
   received_at: string | null;
   processing_status: string;
+  processing_error: string | null;
   parser_key: string | null;
   parser_version: string | null;
   created_at: string;
@@ -114,6 +115,35 @@ function formatMoney(cents: number | null) {
     return "Missing";
   }
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(cents / 100);
+}
+
+function formatProcessingOutcome(status: string, processingError: string | null) {
+  if (processingError) {
+    if (
+      processingError.startsWith("rejected:") ||
+      processingError.startsWith("ignored:") ||
+      processingError.startsWith("parse_failed:") ||
+      processingError.startsWith("email_auth_rejected:")
+    ) {
+      return processingError.replace(/^email_auth_rejected:/, "rejected:");
+    }
+    if (status === "failed") {
+      return `parse_failed:${processingError}`;
+    }
+    if (status === "ignored") {
+      return `ignored:${processingError}`;
+    }
+  }
+  if (status === "parsed") {
+    return "parsed";
+  }
+  if (status === "ignored") {
+    return "ignored:not_payment_email";
+  }
+  if (status === "failed") {
+    return "parse_failed";
+  }
+  return status;
 }
 
 export function EmailsBrowser() {
@@ -300,7 +330,7 @@ export function EmailsBrowser() {
                   <td>{email.provider_name}</td>
                   <td>{email.sender_address ?? "Unknown"}</td>
                   <td>{email.subject ?? "(No subject)"}</td>
-                  <td>{email.processing_status}</td>
+                  <td>{formatProcessingOutcome(email.processing_status, email.processing_error)}</td>
                 </tr>
               ))
             )}
@@ -350,6 +380,10 @@ export function EmailsBrowser() {
               <div>
                 <dt>Received</dt>
                 <dd>{formatDate(selectedEmail.received_at)}</dd>
+              </div>
+              <div>
+                <dt>Status</dt>
+                <dd>{formatProcessingOutcome(selectedEmail.processing_status, selectedEmail.processing_error)}</dd>
               </div>
             </dl>
 
