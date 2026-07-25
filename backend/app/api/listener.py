@@ -20,7 +20,12 @@ router = APIRouter(prefix="/listener", tags=["listener"], dependencies=[Depends(
 async def get_listener_status(db: AsyncSession = Depends(get_db)) -> ListenerStatusResponse:
     heartbeat, heartbeat_at = await read_heartbeat(db)
     now = datetime.now(UTC)
-    stale_after = timedelta(seconds=max(settings.gmail_poll_interval_seconds * 3, 60))
+    heartbeat_interval = (
+        settings.gmail_idle_healthcheck_seconds
+        if settings.gmail_idle_enabled
+        else settings.gmail_poll_interval_seconds
+    )
+    stale_after = timedelta(seconds=max(heartbeat_interval * 3, 60))
     worker_heartbeat = heartbeat
     if heartbeat_at is None or heartbeat_at < now - stale_after:
         worker_heartbeat = "offline"

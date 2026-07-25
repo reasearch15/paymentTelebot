@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     gmail_connection_timeout_seconds: int = 20
     gmail_read_batch_size: int = 50
     gmail_uid_lookback_count: int = 25
+    gmail_idle_enabled: bool = True
+    gmail_idle_healthcheck_seconds: int = 15
+    gmail_idle_refresh_seconds: int = 1500
+    gmail_safety_poll_seconds: int = 900
+    gmail_reconnect_max_backoff_seconds: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -25,6 +30,22 @@ class Settings(BaseSettings):
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator(
+        "gmail_poll_interval_seconds",
+        "gmail_connection_timeout_seconds",
+        "gmail_read_batch_size",
+        "gmail_uid_lookback_count",
+        "gmail_idle_healthcheck_seconds",
+        "gmail_idle_refresh_seconds",
+        "gmail_safety_poll_seconds",
+        "gmail_reconnect_max_backoff_seconds",
+    )
+    @classmethod
+    def positive_int_settings(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("must be >= 1")
         return value
 
 
