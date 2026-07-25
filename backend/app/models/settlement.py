@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, event, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, event, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -8,6 +8,7 @@ from app.db.base import Base
 
 class Settlement(Base):
     __tablename__ = "settlements"
+    __table_args__ = (Index("ix_settlements_settled_at_id", "settled_at", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     payment_account_id: Mapped[int] = mapped_column(

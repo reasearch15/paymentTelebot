@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "@/lib/api";
+
+const PAGE_SIZE = 30;
 
 type Settlement = {
   id: number;
@@ -15,6 +17,13 @@ type Settlement = {
   settled_at: string;
 };
 
+type SettlementListResponse = {
+  items: Settlement[];
+  limit: number;
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
@@ -26,38 +35,89 @@ function formatMoney(cents: number) {
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(cents / 100);
 }
 
+function mergeById(existing: Settlement[], incoming: Settlement[]): Settlement[] {
+  if (incoming.length === 0) {
+    return existing;
+  }
+  const seen = new Set(existing.map((row) => row.id));
+  const appended = incoming.filter((row) => !seen.has(row.id));
+  return appended.length === 0 ? existing : [...existing, ...appended];
+}
+
+function buildSettlementsQuery(cursor?: string | null) {
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  return `/settlements?${params.toString()}`;
+}
+
 export function SettlementsBrowser() {
   const [settlements, setSettlements] = useState<Settlement[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const cancelledRef = useRef(false);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadSettlements() {
-      setIsLoading(true);
-      setError(null);
-      try {
-        const data = await apiRequest<Settlement[]>("/settlements?limit=100");
-        if (!cancelled) {
-          setSettlements(data);
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : "Unable to load settlements");
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+  const loadSettlements = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    setLoadMoreError(null);
+    try {
+      const data = await apiRequest<SettlementListResponse>(buildSettlementsQuery());
+      if (!cancelledRef.current) {
+        setSettlements(data.items);
+        setNextCursor(data.next_cursor);
+        setHasMore(data.has_more);
+      }
+    } catch (caught) {
+      if (!cancelledRef.current) {
+        setError(caught instanceof Error ? caught.message : "Unable to load settlements");
+      }
+    } finally {
+      if (!cancelledRef.current) {
+        setIsLoading(false);
       }
     }
+  }, []);
 
+  useEffect(() => {
+    cancelledRef.current = false;
     void loadSettlements();
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
-  }, []);
+  }, [loadSettlements]);
+
+  async function loadMoreSettlements() {
+    if (!hasMore || !nextCursor || loadingMoreRef.current || isLoading) {
+      return;
+    }
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const data = await apiRequest<SettlementListResponse>(buildSettlementsQuery(nextCursor));
+      if (!cancelledRef.current) {
+        setSettlements((current) => mergeById(current, data.items));
+        setNextCursor(data.next_cursor);
+        setHasMore(data.has_more);
+      }
+    } catch (caught) {
+      if (!cancelledRef.current) {
+        setLoadMoreError(caught instanceof Error ? caught.message : "Unable to load more settlements");
+      }
+    } finally {
+      loadingMoreRef.current = false;
+      if (!cancelledRef.current) {
+        setIsLoadingMore(false);
+      }
+    }
+  }
 
   return (
     <div className="integrations-stack">
@@ -95,6 +155,19 @@ export function SettlementsBrowser() {
             )}
           </tbody>
         </table>
+        {!isLoading && hasMore ? (
+          <div className="load-more-row">
+            {loadMoreError ? <div className="alert-message">{loadMoreError}</div> : null}
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void loadMoreSettlements()}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
+        ) : null}
       </section>
     </div>
   );

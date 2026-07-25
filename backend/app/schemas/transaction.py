@@ -39,4 +39,5 @@ class LedgerListResponse(BaseModel):
     totals: LedgerTotals
     account_balances: list[AccountUnsettledBalance]
     limit: int
-    offset: int
+    next_cursor: str | None = None
+    has_more: bool = False

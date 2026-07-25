@@ -264,6 +264,15 @@ select {
   overflow: hidden;
 }
 
+.load-more-row {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  padding: 16px;
+}
+
 .placeholder-table {
   border-collapse: collapse;
   width: 100%;

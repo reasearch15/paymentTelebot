@@ -9,6 +9,14 @@ from app.models.payment_account import PaymentAccount
 from app.models.transaction import Transaction
 from app.schemas.settlement import AccountUnsettledBalance
 from app.schemas.transaction import LedgerListResponse, LedgerTotals, TransactionSummary
+from app.services.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    apply_newest_first_keyset,
+    clamp_page_size,
+    require_time_id_cursor,
+    slice_page_with_cursor,
+)
 from app.services.settlement import compute_unsettled_balance_cents, sum_settled_cents, sum_transaction_amounts
 
 router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_admin)])
@@ -93,18 +101,19 @@ async def list_transactions(
     payment_account_id: int | None = None,
     provider_id: int | None = None,
     direction: str | None = None,
-    limit: int = Query(default=100, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    cursor: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> LedgerListResponse:
+    page_size = clamp_page_size(limit)
+    cursor_key = require_time_id_cursor(cursor)
+
     query = (
         select(Transaction)
         .join(Transaction.payment_account)
         .join(PaymentAccount.provider)
         .options(selectinload(Transaction.payment_account).selectinload(PaymentAccount.provider))
         .order_by(Transaction.received_at.desc(), Transaction.id.desc())
-        .limit(limit)
-        .offset(offset)
     )
     query = apply_transaction_filters(
         query,
@@ -112,14 +121,32 @@ async def list_transactions(
         provider_id=provider_id,
         direction=direction,
     )
+    query = apply_newest_first_keyset(
+        query,
+        time_column=Transaction.received_at,
+        id_column=Transaction.id,
+        cursor=cursor_key,
+    )
+    # Fetch one extra row to detect has_more without a separate COUNT for the page window.
+    query = query.limit(page_size + 1)
+
     result = await db.execute(query)
-    transactions = [serialize_transaction(row) for row in result.scalars().all()]
+    fetched = list(result.scalars().all())
+    page_rows, next_cursor, has_more = slice_page_with_cursor(
+        fetched,
+        limit=page_size,
+        cursor_from_row=lambda row: (row.received_at, row.id),
+    )
+    transactions = [serialize_transaction(row) for row in page_rows]
+
+    # Totals always cover the full filtered account history, independent of the page window.
     totals = await compute_ledger_totals(db, payment_account_id=payment_account_id)
     account_balances = await list_account_balances(db)
     return LedgerListResponse(
         transactions=transactions,
         totals=totals,
         account_balances=account_balances,
-        limit=limit,
-        offset=offset,
+        limit=page_size,
+        next_cursor=next_cursor,
+        has_more=has_more,
     )

@@ -70,3 +70,10 @@ class AccountUnsettledBalance(BaseModel):
     payment_account_id: int
     friendly_name: str
     unsettled_balance_cents: int
+
+
+class SettlementListResponse(BaseModel):
+    items: list[SettlementResponse]
+    limit: int
+    next_cursor: str | None = None
+    has_more: bool = False

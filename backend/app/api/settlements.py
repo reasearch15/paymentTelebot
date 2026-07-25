@@ -6,7 +6,15 @@ from sqlalchemy.orm import selectinload
 from app.api.auth import require_admin
 from app.db.session import get_db
 from app.models.settlement import Settlement
-from app.schemas.settlement import SettlementCreate, SettlementResponse
+from app.schemas.settlement import SettlementCreate, SettlementListResponse, SettlementResponse
+from app.services.pagination import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    apply_newest_first_keyset,
+    clamp_page_size,
+    require_time_id_cursor,
+    slice_page_with_cursor,
+)
 from app.services.settlement import create_settlement
 
 router = APIRouter(prefix="/settlements", tags=["settlements"], dependencies=[Depends(require_admin)])
@@ -27,24 +35,44 @@ def serialize_settlement(settlement: Settlement) -> SettlementResponse:
     )
 
 
-@router.get("", response_model=list[SettlementResponse])
+@router.get("", response_model=SettlementListResponse)
 async def list_settlements(
     payment_account_id: int | None = None,
-    limit: int = Query(default=100, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    cursor: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
-) -> list[SettlementResponse]:
+) -> SettlementListResponse:
+    page_size = clamp_page_size(limit)
+    cursor_key = require_time_id_cursor(cursor)
+
     query = (
         select(Settlement)
         .options(selectinload(Settlement.payment_account))
         .order_by(Settlement.settled_at.desc(), Settlement.id.desc())
-        .limit(limit)
-        .offset(offset)
     )
     if payment_account_id is not None:
         query = query.where(Settlement.payment_account_id == payment_account_id)
+    query = apply_newest_first_keyset(
+        query,
+        time_column=Settlement.settled_at,
+        id_column=Settlement.id,
+        cursor=cursor_key,
+    )
+    query = query.limit(page_size + 1)
+
     result = await db.execute(query)
-    return [serialize_settlement(row) for row in result.scalars().all()]
+    fetched = list(result.scalars().all())
+    page_rows, next_cursor, has_more = slice_page_with_cursor(
+        fetched,
+        limit=page_size,
+        cursor_from_row=lambda row: (row.settled_at, row.id),
+    )
+    return SettlementListResponse(
+        items=[serialize_settlement(row) for row in page_rows],
+        limit=page_size,
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
 
 
 @router.post("", response_model=SettlementResponse, status_code=status.HTTP_201_CREATED)

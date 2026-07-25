@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest } from "@/lib/api";
+
+const PAGE_SIZE = 30;
 
 type LedgerTransaction = {
   id: number;
@@ -35,7 +37,8 @@ type LedgerResponse = {
   totals: LedgerTotals;
   account_balances: AccountBalance[];
   limit: number;
-  offset: number;
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 type SettlementResponse = {
@@ -55,42 +58,94 @@ function formatMoney(cents: number) {
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(cents / 100);
 }
 
+function mergeById<T extends { id: number }>(existing: T[], incoming: T[]): T[] {
+  if (incoming.length === 0) {
+    return existing;
+  }
+  const seen = new Set(existing.map((row) => row.id));
+  const appended = incoming.filter((row) => !seen.has(row.id));
+  return appended.length === 0 ? existing : [...existing, ...appended];
+}
+
+function buildLedgerQuery(cursor?: string | null) {
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+  return `/transactions?${params.toString()}`;
+}
+
 export function LedgerBrowser() {
   const [transactions, setTransactions] = useState<LedgerTransaction[]>([]);
   const [totals, setTotals] = useState<LedgerTotals | null>(null);
   const [accountBalances, setAccountBalances] = useState<AccountBalance[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [amountInput, setAmountInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const loadingMoreRef = useRef(false);
 
-  async function loadLedger() {
+  const loadLedger = useCallback(async () => {
     setIsLoading(true);
     setError(null);
+    setLoadMoreError(null);
     try {
-      const data = await apiRequest<LedgerResponse>("/transactions?limit=100");
+      const data = await apiRequest<LedgerResponse>(buildLedgerQuery());
       setTransactions(data.transactions);
       setTotals(data.totals);
       setAccountBalances(data.account_balances);
-      if (!selectedAccountId && data.account_balances.length === 1) {
-        setSelectedAccountId(String(data.account_balances[0].payment_account_id));
-      }
+      setNextCursor(data.next_cursor);
+      setHasMore(data.has_more);
+      setSelectedAccountId((current) => {
+        if (current) {
+          return current;
+        }
+        return data.account_balances.length === 1
+          ? String(data.account_balances[0].payment_account_id)
+          : current;
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to load ledger");
     } finally {
       setIsLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     void loadLedger();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadLedger]);
+
+  async function loadMoreTransactions() {
+    if (!hasMore || !nextCursor || loadingMoreRef.current || isLoading) {
+      return;
+    }
+    loadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    try {
+      const data = await apiRequest<LedgerResponse>(buildLedgerQuery(nextCursor));
+      setTransactions((current) => mergeById(current, data.transactions));
+      // Totals remain global; refresh from the same independent aggregate payload.
+      setTotals(data.totals);
+      setAccountBalances(data.account_balances);
+      setNextCursor(data.next_cursor);
+      setHasMore(data.has_more);
+    } catch (caught) {
+      setLoadMoreError(caught instanceof Error ? caught.message : "Unable to load more transactions");
+    } finally {
+      loadingMoreRef.current = false;
+      setIsLoadingMore(false);
+    }
+  }
 
   const selectedBalance = useMemo(
     () => accountBalances.find((account) => String(account.payment_account_id) === selectedAccountId) ?? null,
@@ -252,6 +307,19 @@ export function LedgerBrowser() {
             )}
           </tbody>
         </table>
+        {!isLoading && hasMore ? (
+          <div className="load-more-row">
+            {loadMoreError ? <div className="alert-message">{loadMoreError}</div> : null}
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void loadMoreTransactions()}
+              disabled={isLoadingMore}
+            >
+              {isLoadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
+        ) : null}
       </section>
 
       {isModalOpen ? (
