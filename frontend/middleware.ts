@@ -39,6 +39,8 @@ export const config = {
     "/integrations/:path*",
     "/ledger/:path*",
     "/settlements/:path*",
+    "/player-ledger/:path*",
+    "/player-settlements/:path*",
     "/login",
   ],
 };

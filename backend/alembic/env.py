@@ -7,7 +7,16 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import app_setting, payment_account, payment_email, provider, settlement, telegram_integration, transaction
+from app.models import (
+    app_setting,
+    payment_account,
+    payment_email,
+    player_settlement,
+    provider,
+    settlement,
+    telegram_integration,
+    transaction,
+)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

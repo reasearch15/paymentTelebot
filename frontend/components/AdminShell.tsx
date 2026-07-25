@@ -8,6 +8,8 @@ const navItems = [
   { href: "/emails", label: "Emails" },
   { href: "/ledger", label: "Ledger" },
   { href: "/settlements", label: "Settlements" },
+  { href: "/player-ledger", label: "Player Ledger" },
+  { href: "/player-settlements", label: "Player Settlements" },
 ];
 
 type AdminShellProps = {
