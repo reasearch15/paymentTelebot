@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.dashboard import router as dashboard_router
 from app.api.listener import router as listener_router
 from app.api.payment_accounts import router as payment_accounts_router
 from app.api.payment_emails import router as payment_emails_router
@@ -37,6 +38,7 @@ app.include_router(transactions_router)
 app.include_router(settlements_router)
 app.include_router(player_ledger_router)
 app.include_router(listener_router)
+app.include_router(dashboard_router)
 app.include_router(telegram_router)
 
 
