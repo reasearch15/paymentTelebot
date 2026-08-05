@@ -7,6 +7,7 @@ const navItems = [
   { href: "/integrations", label: "Integrations" },
   { href: "/emails", label: "Emails" },
   { href: "/ledger", label: "Ledger" },
+  { href: "/bot-ledger", label: "Bot Ledger" },
   { href: "/telegram-deliveries", label: "Telegram Deliveries" },
   { href: "/settlements", label: "Settlements" },
   { href: "/player-ledger", label: "Player Ledger" },

@@ -18,6 +18,7 @@ from app.models import (
     telegram_delivery,
     telegram_delivery_attempt,
     telegram_integration,
+    telegram_integration_settlement,
     transaction,
 )
 

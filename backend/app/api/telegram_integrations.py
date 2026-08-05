@@ -257,6 +257,24 @@ async def delete_telegram_integration(
             detail="Cannot delete a Telegram integration with delivery history. Disable it instead.",
         )
 
+    from app.models.telegram_integration_settlement import TelegramIntegrationSettlement
+
+    settlement_count = int(
+        (
+            await db.scalar(
+                select(func.count(TelegramIntegrationSettlement.id)).where(
+                    TelegramIntegrationSettlement.telegram_integration_id == integration_id
+                )
+            )
+        )
+        or 0
+    )
+    if settlement_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete a Telegram integration with settlement history. Disable it instead.",
+        )
+
     await db.delete(integration)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

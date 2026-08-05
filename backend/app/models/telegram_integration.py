@@ -41,3 +41,7 @@ class TelegramIntegration(Base):
         back_populates="telegram_integration",
         passive_deletes=True,
     )
+    settlements: Mapped[list["TelegramIntegrationSettlement"]] = relationship(
+        back_populates="telegram_integration",
+        passive_deletes=True,
+    )

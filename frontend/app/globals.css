@@ -579,6 +579,18 @@ select {
   width: min(480px, 100%);
 }
 
+.bot-ledger-layout {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr);
+}
+
+.bot-ledger-side {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
 .timeline-list {
   display: grid;
   gap: 12px;
@@ -598,6 +610,12 @@ select {
 
 .clickable-row:hover {
   background: rgba(18, 27, 36, 0.04);
+}
+
+@media (max-width: 1000px) {
+  .bot-ledger-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .email-detail-header {

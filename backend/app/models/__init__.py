@@ -8,6 +8,7 @@ from app.models.settlement import Settlement
 from app.models.telegram_delivery import TelegramDelivery
 from app.models.telegram_delivery_attempt import TelegramDeliveryAttempt
 from app.models.telegram_integration import DEFAULT_TELEGRAM_INTEGRATION_NAME, TelegramIntegration
+from app.models.telegram_integration_settlement import TelegramIntegrationSettlement
 from app.models.transaction import Direction, Transaction
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "TelegramDelivery",
     "TelegramDeliveryAttempt",
     "TelegramIntegration",
+    "TelegramIntegrationSettlement",
     "Transaction",
 ]
