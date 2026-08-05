@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from app.schemas.settlement import AccountUnsettledBalance
+from app.schemas.telegram import TelegramDeliverySummary
 
 
 class TransactionSummary(BaseModel):
@@ -22,6 +23,7 @@ class TransactionSummary(BaseModel):
     telegram_status: str
     telegram_sent_at: datetime | None
     created_at: datetime
+    telegram_delivery_summary: TelegramDeliverySummary | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

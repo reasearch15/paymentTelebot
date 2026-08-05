@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.schemas.telegram import PaymentAccountTelegramIntegrationSummary
+
 
 class PaymentAccountCreate(BaseModel):
     provider_id: int
@@ -9,6 +11,7 @@ class PaymentAccountCreate(BaseModel):
     receiver_tag: str | None = Field(default=None, max_length=120)
     gmail_address: EmailStr
     app_password: str = Field(min_length=1, max_length=255)
+    telegram_integration_ids: list[int] = Field(default_factory=list)
 
     @field_validator("friendly_name", "app_password")
     @classmethod
@@ -42,6 +45,7 @@ class PaymentAccountUpdate(BaseModel):
     receiver_tag: str | None = Field(default=None, max_length=120)
     gmail_address: EmailStr | None = None
     app_password: str | None = Field(default=None, min_length=1, max_length=255)
+    telegram_integration_ids: list[int] | None = None
 
     @field_validator("friendly_name", "app_password")
     @classmethod
@@ -86,6 +90,9 @@ class PaymentAccountResponse(BaseModel):
     has_app_password: bool
     created_at: datetime
     updated_at: datetime
+    telegram_integrations: list[PaymentAccountTelegramIntegrationSummary] = Field(default_factory=list)
+    telegram_integration_count: int = 0
+    telegram_integration_ids: list[int] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

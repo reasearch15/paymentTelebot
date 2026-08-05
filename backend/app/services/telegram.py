@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -6,7 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -18,6 +19,7 @@ from app.models.payment_account_telegram_route import PaymentAccountTelegramRout
 from app.models.telegram_delivery import TelegramDelivery
 from app.models.telegram_integration import DEFAULT_TELEGRAM_INTEGRATION_NAME, TelegramIntegration
 from app.models.transaction import Direction, Transaction
+from app.schemas.telegram import TelegramDeliverySummary
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,11 @@ def mask_bot_token(token: str | None) -> str | None:
     if len(stripped) <= 8:
         return "*" * len(stripped)
     return f"{stripped[:4]}...{stripped[-4:]}"
+
+
+def bot_token_fingerprint(token: str) -> str:
+    """Stable SHA-256 fingerprint for duplicate destination checks. Never log or return this with secrets."""
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
 
 
 def sanitize_telegram_error(error: BaseException | str, token: str | None = None) -> str:
@@ -113,8 +120,27 @@ async def telegram_get_chat(bot_token: str, group_id: str) -> dict:
     return await asyncio.to_thread(_telegram_post, bot_token, "getChat", {"chat_id": group_id})
 
 
+def extract_bot_username(get_me_response: dict) -> str | None:
+    result = get_me_response.get("result")
+    if not isinstance(result, dict):
+        return None
+    username = result.get("username")
+    if isinstance(username, str) and username.strip():
+        return username.strip().lstrip("@")
+    return None
+
+
 async def test_telegram_integration(session: AsyncSession, send_message: bool = False) -> TelegramApiResult:
     integration = await get_or_create_telegram_integration(session)
+    return await test_specific_telegram_integration(session, integration, send_message=send_message)
+
+
+async def test_specific_telegram_integration(
+    session: AsyncSession,
+    integration: TelegramIntegration,
+    *,
+    send_message: bool = False,
+) -> TelegramApiResult:
     now = datetime.now(UTC)
     integration.last_checked_at = now
 
@@ -126,7 +152,10 @@ async def test_telegram_integration(session: AsyncSession, send_message: bool = 
     bot_token = decrypt_secret(integration.bot_token_encrypted)
     group_id = normalize_group_id(integration.group_id)
     try:
-        await telegram_get_me(bot_token)
+        me = await telegram_get_me(bot_token)
+        username = extract_bot_username(me)
+        if username:
+            integration.bot_username = username
         if send_message:
             await telegram_send_message(bot_token, group_id or "", CONNECTED_MESSAGE)
         else:
@@ -139,6 +168,88 @@ async def test_telegram_integration(session: AsyncSession, send_message: bool = 
         integration.last_error = sanitize_telegram_error(exc, bot_token)
         await session.commit()
         return TelegramApiResult(False, integration.last_error)
+
+
+async def find_duplicate_telegram_destination(
+    session: AsyncSession,
+    *,
+    bot_token: str,
+    group_id: str,
+    exclude_integration_id: int | None = None,
+) -> TelegramIntegration | None:
+    """Return an existing integration with the same token fingerprint + group_id, if any."""
+    normalized_group = normalize_group_id(group_id)
+    if normalized_group is None:
+        return None
+    target = bot_token_fingerprint(bot_token)
+    query = select(TelegramIntegration).where(TelegramIntegration.group_id == normalized_group)
+    if exclude_integration_id is not None:
+        query = query.where(TelegramIntegration.id != exclude_integration_id)
+    integrations = list((await session.scalars(query)).all())
+    for integration in integrations:
+        if not integration.bot_token_encrypted:
+            continue
+        try:
+            existing_token = decrypt_secret(integration.bot_token_encrypted)
+        except ValueError:
+            continue
+        if bot_token_fingerprint(existing_token) == target:
+            return integration
+    return None
+
+
+async def count_routes_by_integration(session: AsyncSession) -> dict[int, int]:
+    result = await session.execute(
+        select(
+            PaymentAccountTelegramRoute.telegram_integration_id,
+            func.count(PaymentAccountTelegramRoute.id),
+        ).group_by(PaymentAccountTelegramRoute.telegram_integration_id)
+    )
+    return {integration_id: int(count) for integration_id, count in result.all()}
+
+
+async def lowest_telegram_integration_id(session: AsyncSession) -> int | None:
+    return await session.scalar(select(TelegramIntegration.id).order_by(TelegramIntegration.id).limit(1))
+
+
+def build_telegram_delivery_summary(deliveries: list[TelegramDelivery]) -> TelegramDeliverySummary | None:
+    if not deliveries:
+        return None
+    summary = TelegramDeliverySummary(total=len(deliveries))
+    for delivery in deliveries:
+        if delivery.status == "sent":
+            summary.sent += 1
+        elif delivery.status == "failed":
+            summary.failed += 1
+        elif delivery.status == "pending":
+            summary.pending += 1
+        elif delivery.status == "sending":
+            summary.sending += 1
+    return summary
+
+
+async def load_delivery_summaries_for_transactions(
+    session: AsyncSession,
+    transaction_ids: list[int],
+) -> dict[int, TelegramDeliverySummary]:
+    if not transaction_ids:
+        return {}
+    deliveries = list(
+        (
+            await session.scalars(
+                select(TelegramDelivery).where(TelegramDelivery.transaction_id.in_(transaction_ids))
+            )
+        ).all()
+    )
+    by_txn: dict[int, list[TelegramDelivery]] = {}
+    for delivery in deliveries:
+        by_txn.setdefault(delivery.transaction_id, []).append(delivery)
+    summaries: dict[int, TelegramDeliverySummary] = {}
+    for txn_id, rows in by_txn.items():
+        summary = build_telegram_delivery_summary(rows)
+        if summary is not None:
+            summaries[txn_id] = summary
+    return summaries
 
 
 def format_transaction_message(transaction: Transaction) -> str:

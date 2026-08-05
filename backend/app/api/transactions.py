@@ -9,6 +9,7 @@ from app.models.payment_account import PaymentAccount
 from app.models.transaction import Transaction
 from app.schemas.settlement import AccountUnsettledBalance
 from app.schemas.transaction import LedgerListResponse, LedgerTotals, TransactionSummary
+from app.schemas.telegram import TelegramDeliverySummary
 from app.services.pagination import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -18,11 +19,15 @@ from app.services.pagination import (
     slice_page_with_cursor,
 )
 from app.services.settlement import compute_unsettled_balance_cents, sum_settled_cents, sum_transaction_amounts
+from app.services.telegram import load_delivery_summaries_for_transactions
 
 router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_admin)])
 
 
-def serialize_transaction(transaction: Transaction) -> TransactionSummary:
+def serialize_transaction(
+    transaction: Transaction,
+    delivery_summary: TelegramDeliverySummary | None = None,
+) -> TransactionSummary:
     account = transaction.payment_account
     provider = account.provider
     return TransactionSummary(
@@ -42,6 +47,7 @@ def serialize_transaction(transaction: Transaction) -> TransactionSummary:
         telegram_status=transaction.telegram_status,
         telegram_sent_at=transaction.telegram_sent_at,
         created_at=transaction.created_at,
+        telegram_delivery_summary=delivery_summary,
     )
 
 
@@ -137,7 +143,14 @@ async def list_transactions(
         limit=page_size,
         cursor_from_row=lambda row: (row.received_at, row.id),
     )
-    transactions = [serialize_transaction(row) for row in page_rows]
+    delivery_summaries = await load_delivery_summaries_for_transactions(
+        db,
+        [row.id for row in page_rows],
+    )
+    transactions = [
+        serialize_transaction(row, delivery_summaries.get(row.id))
+        for row in page_rows
+    ]
 
     # Totals always cover the full filtered account history, independent of the page window.
     totals = await compute_ledger_totals(db, payment_account_id=payment_account_id)

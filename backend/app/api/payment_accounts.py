@@ -7,18 +7,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.auth import require_admin
+from app.api.telegram_integrations import serialize_integration
 from app.core.encryption import decrypt_secret, encrypt_secret
 from app.db.session import AsyncSessionLocal, get_db
 from app.models.payment_account import PaymentAccount
+from app.models.payment_account_telegram_route import PaymentAccountTelegramRoute
 from app.models.payment_email import PaymentEmail
 from app.models.provider import Provider
+from app.models.telegram_integration import TelegramIntegration
 from app.schemas.payment_account import (
     ConnectionTestResponse,
     PaymentAccountCreate,
     PaymentAccountResponse,
     PaymentAccountUpdate,
 )
+from app.schemas.telegram import (
+    PaymentAccountTelegramAssignmentUpdate,
+    PaymentAccountTelegramIntegrationsRead,
+    PaymentAccountTelegramIntegrationSummary,
+)
 from app.services.gmail_imap import test_gmail_connection
+from app.services.telegram import count_routes_by_integration, lowest_telegram_integration_id
+from app.services.telegram_assignments import (
+    list_integrations_for_payment_account,
+    replace_payment_account_telegram_integrations,
+)
 
 router = APIRouter(prefix="/payment-accounts", tags=["payment accounts"], dependencies=[Depends(require_admin)])
 
@@ -31,7 +44,42 @@ async def get_last_captured_email_times(db: AsyncSession) -> dict[int, object]:
     return {payment_account_id: captured_at for payment_account_id, captured_at in result.all()}
 
 
-def serialize_account(account: PaymentAccount, last_captured_email_at=None) -> PaymentAccountResponse:
+async def load_account_telegram_summaries(
+    db: AsyncSession,
+    account_ids: list[int],
+) -> dict[int, list[PaymentAccountTelegramIntegrationSummary]]:
+    if not account_ids:
+        return {}
+
+    result = await db.execute(
+        select(PaymentAccountTelegramRoute.payment_account_id, TelegramIntegration)
+        .join(
+            TelegramIntegration,
+            TelegramIntegration.id == PaymentAccountTelegramRoute.telegram_integration_id,
+        )
+        .where(PaymentAccountTelegramRoute.payment_account_id.in_(account_ids))
+        .order_by(TelegramIntegration.id)
+    )
+    summaries: dict[int, list[PaymentAccountTelegramIntegrationSummary]] = {account_id: [] for account_id in account_ids}
+    for account_id, integration in result.all():
+        summaries.setdefault(account_id, []).append(
+            PaymentAccountTelegramIntegrationSummary(
+                id=integration.id,
+                name=integration.name,
+                enabled=integration.enabled,
+                bot_username=integration.bot_username,
+                group_id=integration.group_id,
+            )
+        )
+    return summaries
+
+
+def serialize_account(
+    account: PaymentAccount,
+    last_captured_email_at=None,
+    telegram_integrations: list[PaymentAccountTelegramIntegrationSummary] | None = None,
+) -> PaymentAccountResponse:
+    integrations = telegram_integrations or []
     return PaymentAccountResponse(
         id=account.id,
         provider_id=account.provider_id,
@@ -47,6 +95,9 @@ def serialize_account(account: PaymentAccount, last_captured_email_at=None) -> P
         has_app_password=bool(account.encrypted_app_password),
         created_at=account.created_at,
         updated_at=account.updated_at,
+        telegram_integrations=integrations,
+        telegram_integration_count=len(integrations),
+        telegram_integration_ids=[item.id for item in integrations],
     )
 
 
@@ -110,8 +161,17 @@ async def list_payment_accounts(db: AsyncSession = Depends(get_db)) -> list[Paym
         .options(selectinload(PaymentAccount.provider))
         .order_by(PaymentAccount.friendly_name)
     )
+    accounts = list(result.scalars().all())
     last_captured = await get_last_captured_email_times(db)
-    return [serialize_account(account, last_captured.get(account.id)) for account in result.scalars().all()]
+    telegram_map = await load_account_telegram_summaries(db, [account.id for account in accounts])
+    return [
+        serialize_account(
+            account,
+            last_captured.get(account.id),
+            telegram_map.get(account.id, []),
+        )
+        for account in accounts
+    ]
 
 
 @router.post("", response_model=PaymentAccountResponse, status_code=status.HTTP_201_CREATED)
@@ -131,19 +191,31 @@ async def create_payment_account(
     db.add(account)
 
     try:
+        await db.flush()
+        if payload.telegram_integration_ids:
+            await replace_payment_account_telegram_integrations(
+                db,
+                account.id,
+                payload.telegram_integration_ids,
+            )
         await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except IntegrityError as exc:
         await db.rollback()
         raise_account_conflict(exc)
 
     account = await get_account_or_404(db, account.id)
-    return serialize_account(account)
+    telegram_map = await load_account_telegram_summaries(db, [account.id])
+    return serialize_account(account, telegram_integrations=telegram_map.get(account.id, []))
 
 
 @router.get("/{account_id}", response_model=PaymentAccountResponse)
 async def get_payment_account(account_id: int, db: AsyncSession = Depends(get_db)) -> PaymentAccountResponse:
     account = await get_account_or_404(db, account_id)
-    return serialize_account(account)
+    telegram_map = await load_account_telegram_summaries(db, [account.id])
+    return serialize_account(account, telegram_integrations=telegram_map.get(account.id, []))
 
 
 @router.patch("/{account_id}", response_model=PaymentAccountResponse)
@@ -154,6 +226,7 @@ async def update_payment_account(
 ) -> PaymentAccountResponse:
     account = await get_account_or_404(db, account_id)
     updates = payload.model_dump(exclude_unset=True)
+    telegram_ids = updates.pop("telegram_integration_ids", None)
 
     if "provider_id" in updates:
         await ensure_provider_exists(db, updates["provider_id"])
@@ -171,13 +244,19 @@ async def update_payment_account(
         setattr(account, field, value)
 
     try:
+        if telegram_ids is not None:
+            await replace_payment_account_telegram_integrations(db, account.id, telegram_ids)
         await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except IntegrityError as exc:
         await db.rollback()
         raise_account_conflict(exc)
 
     account = await get_account_or_404(db, account.id)
-    return serialize_account(account)
+    telegram_map = await load_account_telegram_summaries(db, [account.id])
+    return serialize_account(account, telegram_integrations=telegram_map.get(account.id, []))
 
 
 @router.post("/{account_id}/enable", response_model=PaymentAccountResponse)
@@ -186,7 +265,8 @@ async def enable_payment_account(account_id: int, db: AsyncSession = Depends(get
     account.enabled = True
     await db.commit()
     account = await get_account_or_404(db, account.id)
-    return serialize_account(account)
+    telegram_map = await load_account_telegram_summaries(db, [account.id])
+    return serialize_account(account, telegram_integrations=telegram_map.get(account.id, []))
 
 
 @router.post("/{account_id}/disable", response_model=PaymentAccountResponse)
@@ -195,7 +275,8 @@ async def disable_payment_account(account_id: int, db: AsyncSession = Depends(ge
     account.enabled = False
     await db.commit()
     account = await get_account_or_404(db, account.id)
-    return serialize_account(account)
+    telegram_map = await load_account_telegram_summaries(db, [account.id])
+    return serialize_account(account, telegram_integrations=telegram_map.get(account.id, []))
 
 
 @router.post("/{account_id}/test-connection", response_model=ConnectionTestResponse)
@@ -218,3 +299,56 @@ async def test_payment_account_connection(
             await update_db.commit()
 
     return ConnectionTestResponse(success=result.success, message=result.message, checked_at=result.checked_at)
+
+
+@router.get("/{account_id}/telegram-integrations", response_model=PaymentAccountTelegramIntegrationsRead)
+async def get_payment_account_telegram_integrations(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> PaymentAccountTelegramIntegrationsRead:
+    await get_account_or_404(db, account_id)
+    integrations = await list_integrations_for_payment_account(db, account_id)
+    counts = await count_routes_by_integration(db)
+    legacy_id = await lowest_telegram_integration_id(db)
+    return PaymentAccountTelegramIntegrationsRead(
+        payment_account_id=account_id,
+        telegram_integrations=[
+            serialize_integration(
+                integration,
+                assigned_count=counts.get(integration.id, 0),
+                legacy_default_id=legacy_id,
+            )
+            for integration in integrations
+        ],
+    )
+
+
+@router.put("/{account_id}/telegram-integrations", response_model=PaymentAccountTelegramIntegrationsRead)
+async def put_payment_account_telegram_integrations(
+    account_id: int,
+    payload: PaymentAccountTelegramAssignmentUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> PaymentAccountTelegramIntegrationsRead:
+    await get_account_or_404(db, account_id)
+    try:
+        integrations = await replace_payment_account_telegram_integrations(
+            db,
+            account_id,
+            payload.telegram_integration_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    await db.commit()
+    counts = await count_routes_by_integration(db)
+    legacy_id = await lowest_telegram_integration_id(db)
+    return PaymentAccountTelegramIntegrationsRead(
+        payment_account_id=account_id,
+        telegram_integrations=[
+            serialize_integration(
+                integration,
+                assigned_count=counts.get(integration.id, 0),
+                legacy_default_id=legacy_id,
+            )
+            for integration in integrations
+        ],
+    )

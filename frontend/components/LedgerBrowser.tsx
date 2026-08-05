@@ -5,6 +5,14 @@ import { apiRequest } from "@/lib/api";
 
 const PAGE_SIZE = 30;
 
+type TelegramDeliverySummary = {
+  total: number;
+  sent: number;
+  failed: number;
+  pending: number;
+  sending: number;
+};
+
 type LedgerTransaction = {
   id: number;
   payment_account_id: number;
@@ -16,6 +24,7 @@ type LedgerTransaction = {
   provider_reference: string | null;
   received_at: string;
   telegram_status: string;
+  telegram_delivery_summary?: TelegramDeliverySummary | null;
 };
 
 type LedgerTotals = {
@@ -56,6 +65,27 @@ function formatDate(value: string) {
 
 function formatMoney(cents: number) {
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(cents / 100);
+}
+
+function formatTelegramStatus(transaction: LedgerTransaction) {
+  const summary = transaction.telegram_delivery_summary;
+  if (summary && summary.total > 0) {
+    const parts: string[] = [];
+    if (summary.sent > 0) {
+      parts.push(`${summary.sent} sent`);
+    }
+    if (summary.failed > 0) {
+      parts.push(`${summary.failed} failed`);
+    }
+    if (summary.pending > 0) {
+      parts.push(`${summary.pending} pending`);
+    }
+    if (summary.sending > 0) {
+      parts.push(`${summary.sending} sending`);
+    }
+    return parts.length > 0 ? parts.join(", ") : transaction.telegram_status;
+  }
+  return transaction.telegram_status;
 }
 
 function mergeById<T extends { id: number }>(existing: T[], incoming: T[]): T[] {
@@ -301,7 +331,7 @@ export function LedgerBrowser() {
                   <td>{formatMoney(transaction.amount_cents)}</td>
                   <td>{transaction.sender_name ?? "Unknown"}</td>
                   <td>{transaction.provider_reference ?? transaction.receiver_tag ?? "—"}</td>
-                  <td>{transaction.telegram_status}</td>
+                  <td>{formatTelegramStatus(transaction)}</td>
                 </tr>
               ))
             )}

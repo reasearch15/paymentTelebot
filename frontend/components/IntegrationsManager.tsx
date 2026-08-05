@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { apiRequest } from "@/lib/api";
+import { TelegramIntegration, TelegramIntegrationsSection } from "@/components/TelegramIntegrationsSection";
 
 type Provider = {
   id: number;
@@ -10,6 +11,14 @@ type Provider = {
   enabled: boolean;
   created_at: string;
   updated_at: string;
+};
+
+type PaymentAccountTelegramSummary = {
+  id: number;
+  name: string;
+  enabled: boolean;
+  bot_username: string | null;
+  group_id: string | null;
 };
 
 type PaymentAccount = {
@@ -27,16 +36,9 @@ type PaymentAccount = {
   has_app_password: boolean;
   created_at: string;
   updated_at: string;
-};
-
-type TelegramSettings = {
-  bot_token_masked: string | null;
-  group_id: string | null;
-  enabled: boolean;
-  connected: boolean;
-  last_checked_at: string | null;
-  last_success_at: string | null;
-  last_error: string | null;
+  telegram_integrations: PaymentAccountTelegramSummary[];
+  telegram_integration_count: number;
+  telegram_integration_ids: number[];
 };
 
 type ProviderFormState = {
@@ -50,12 +52,7 @@ type AccountFormState = {
   friendly_name: string;
   gmail_address: string;
   app_password: string;
-};
-
-type TelegramFormState = {
-  bot_token: string;
-  group_id: string;
-  enabled: boolean;
+  telegram_integration_ids: number[];
 };
 
 const emptyProviderForm: ProviderFormState = {
@@ -69,12 +66,7 @@ const emptyAccountForm: AccountFormState = {
   friendly_name: "",
   gmail_address: "",
   app_password: "",
-};
-
-const emptyTelegramForm: TelegramFormState = {
-  bot_token: "",
-  group_id: "",
-  enabled: false,
+  telegram_integration_ids: [],
 };
 
 function formatDate(value: string | null) {
@@ -97,7 +89,7 @@ function errorMessage(error: unknown) {
 export function IntegrationsManager() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [accounts, setAccounts] = useState<PaymentAccount[]>([]);
-  const [telegramSettings, setTelegramSettings] = useState<TelegramSettings | null>(null);
+  const [telegramIntegrations, setTelegramIntegrations] = useState<TelegramIntegration[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
   const [providerModalOpen, setProviderModalOpen] = useState(false);
@@ -107,27 +99,31 @@ export function IntegrationsManager() {
   const [accountForm, setAccountForm] = useState<AccountFormState>(emptyAccountForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [connectionResults, setConnectionResults] = useState<Record<number, string>>({});
-  const [telegramForm, setTelegramForm] = useState<TelegramFormState>(emptyTelegramForm);
-  const [telegramMessage, setTelegramMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const enabledProviders = useMemo(() => providers.filter((provider) => provider.enabled), [providers]);
 
+  const sortedTelegramIntegrations = useMemo(
+    () =>
+      [...telegramIntegrations].sort((a, b) => {
+        if (a.enabled !== b.enabled) {
+          return a.enabled ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      }),
+    [telegramIntegrations]
+  );
+
   async function loadData() {
     setPageError(null);
-    const [providerData, accountData, telegramData] = await Promise.all([
+    const [providerData, accountData, integrationData] = await Promise.all([
       apiRequest<Provider[]>("/providers"),
       apiRequest<PaymentAccount[]>("/payment-accounts"),
-      apiRequest<TelegramSettings>("/telegram/settings"),
+      apiRequest<TelegramIntegration[]>("/telegram-integrations"),
     ]);
     setProviders(providerData);
     setAccounts(accountData);
-    setTelegramSettings(telegramData);
-    setTelegramForm({
-      bot_token: "",
-      group_id: telegramData.group_id ?? "",
-      enabled: telegramData.enabled,
-    });
+    setTelegramIntegrations(integrationData);
   }
 
   useEffect(() => {
@@ -159,9 +155,19 @@ export function IntegrationsManager() {
       friendly_name: account.friendly_name,
       gmail_address: account.gmail_address,
       app_password: "",
+      telegram_integration_ids: [...account.telegram_integration_ids],
     });
     setFormError(null);
     setAccountModalOpen(true);
+  }
+
+  function toggleAccountTelegramIntegration(integrationId: number) {
+    setAccountForm((current) => ({
+      ...current,
+      telegram_integration_ids: current.telegram_integration_ids.includes(integrationId)
+        ? current.telegram_integration_ids.filter((id) => id !== integrationId)
+        : [...current.telegram_integration_ids, integrationId],
+    }));
   }
 
   async function submitProvider(event: FormEvent<HTMLFormElement>) {
@@ -187,10 +193,11 @@ export function IntegrationsManager() {
     setFormError(null);
     setIsSubmitting(true);
 
-    const payload: Record<string, string | number> = {
+    const payload: Record<string, string | number | number[]> = {
       provider_id: Number(accountForm.provider_id),
       friendly_name: accountForm.friendly_name,
       gmail_address: accountForm.gmail_address,
+      telegram_integration_ids: accountForm.telegram_integration_ids,
     };
 
     if (!editingAccount || accountForm.app_password.trim()) {
@@ -245,59 +252,6 @@ export function IntegrationsManager() {
       await loadData();
     } catch (error) {
       setConnectionResults((current) => ({ ...current, [account.id]: errorMessage(error) }));
-    }
-  }
-
-  async function saveTelegramSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setTelegramMessage(null);
-    setIsSubmitting(true);
-    const payload: Record<string, string | boolean> = {
-      group_id: telegramForm.group_id,
-      enabled: telegramForm.enabled,
-    };
-    if (telegramForm.bot_token.trim()) {
-      payload.bot_token = telegramForm.bot_token;
-    }
-    try {
-      const updated = await apiRequest<TelegramSettings>("/telegram/settings", {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      setTelegramSettings(updated);
-      setTelegramForm({ bot_token: "", group_id: updated.group_id ?? "", enabled: updated.enabled });
-      setTelegramMessage("Telegram settings saved.");
-    } catch (error) {
-      setTelegramMessage(errorMessage(error));
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  async function runTelegramAction(action: "test-connection" | "send-test-message") {
-    setTelegramMessage(null);
-    try {
-      const result = await apiRequest<{
-        success: boolean;
-        message: string;
-        last_checked_at: string | null;
-        last_success_at: string | null;
-        last_error: string | null;
-      }>(`/telegram/${action}`, { method: "POST" });
-      setTelegramSettings((current) =>
-        current
-          ? {
-              ...current,
-              connected: result.success,
-              last_checked_at: result.last_checked_at,
-              last_success_at: result.last_success_at,
-              last_error: result.last_error,
-            }
-          : current
-      );
-      setTelegramMessage(result.message);
-    } catch (error) {
-      setTelegramMessage(errorMessage(error));
     }
   }
 
@@ -383,6 +337,10 @@ export function IntegrationsManager() {
                     <dd>{account.provider_name}</dd>
                   </div>
                   <div>
+                    <dt>Telegram destinations</dt>
+                    <dd>{account.telegram_integration_count}</dd>
+                  </div>
+                  <div>
                     <dt>Listener status</dt>
                     <dd>
                       <span className={`status-badge ${account.listener_status === "error" ? "disabled" : "enabled"}`}>
@@ -427,84 +385,12 @@ export function IntegrationsManager() {
         )}
       </section>
 
-      <section className="management-section">
-        <div className="section-heading">
-          <div>
-            <h2>Telegram Integration</h2>
-            <p>Send notifications for newly parsed incoming payments.</p>
-          </div>
-          {telegramSettings ? (
-            <div className="row-actions">
-              <span className={telegramSettings.enabled ? "status-badge enabled" : "status-badge disabled"}>
-                {telegramSettings.enabled ? "Enabled" : "Disabled"}
-              </span>
-              <span className={telegramSettings.connected ? "status-badge enabled" : "status-badge disabled"}>
-                {telegramSettings.connected ? "Connected" : "Failed"}
-              </span>
-            </div>
-          ) : null}
-        </div>
-
-        <form className="form-stack telegram-settings-form" onSubmit={saveTelegramSettings}>
-          <div className="field">
-            <label htmlFor="telegram-token">Bot Token</label>
-            <input
-              id="telegram-token"
-              type="password"
-              value={telegramForm.bot_token}
-              onChange={(event) => setTelegramForm((current) => ({ ...current, bot_token: event.target.value }))}
-              placeholder={telegramSettings?.bot_token_masked ?? ""}
-              autoComplete="new-password"
-            />
-            <p className="helper-text">Leave blank to keep the saved token.</p>
-          </div>
-          <div className="field">
-            <label htmlFor="telegram-group-id">Group ID</label>
-            <input
-              id="telegram-group-id"
-              value={telegramForm.group_id}
-              onChange={(event) => setTelegramForm((current) => ({ ...current, group_id: event.target.value }))}
-              required
-            />
-          </div>
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={telegramForm.enabled}
-              onChange={(event) => setTelegramForm((current) => ({ ...current, enabled: event.target.checked }))}
-            />
-            Enabled
-          </label>
-          {telegramSettings ? (
-            <dl className="account-details">
-              <div>
-                <dt>Last checked</dt>
-                <dd>{formatDate(telegramSettings.last_checked_at)}</dd>
-              </div>
-              <div>
-                <dt>Last successful message</dt>
-                <dd>{formatDate(telegramSettings.last_success_at)}</dd>
-              </div>
-              <div>
-                <dt>Last error</dt>
-                <dd>{telegramSettings.last_error ?? "None"}</dd>
-              </div>
-            </dl>
-          ) : null}
-          {telegramMessage ? <div className="inline-result">{telegramMessage}</div> : null}
-          <div className="row-actions">
-            <button className="primary-button" type="submit" disabled={isSubmitting}>
-              Save Settings
-            </button>
-            <button className="secondary-button" type="button" onClick={() => runTelegramAction("test-connection")}>
-              Test Connection
-            </button>
-            <button className="secondary-button" type="button" onClick={() => runTelegramAction("send-test-message")}>
-              Send Test Message
-            </button>
-          </div>
-        </form>
-      </section>
+      <TelegramIntegrationsSection
+        integrations={telegramIntegrations}
+        accounts={accounts}
+        isLoading={isLoading}
+        onRefresh={loadData}
+      />
 
       {providerModalOpen ? (
         <div className="modal-backdrop" role="presentation">
@@ -605,6 +491,28 @@ export function IntegrationsManager() {
                   autoComplete="new-password"
                 />
                 <p className="helper-text">Use the Gmail 16-character App Password, not the normal Gmail password.</p>
+              </div>
+              <div className="field">
+                <span>Telegram Integrations</span>
+                {sortedTelegramIntegrations.length === 0 ? (
+                  <p className="helper-text">No Telegram integrations configured yet.</p>
+                ) : (
+                  sortedTelegramIntegrations.map((integration) => (
+                    <label className="toggle-row" key={integration.id}>
+                      <input
+                        type="checkbox"
+                        checked={accountForm.telegram_integration_ids.includes(integration.id)}
+                        onChange={() => toggleAccountTelegramIntegration(integration.id)}
+                        disabled={isSubmitting}
+                      />
+                      <span>
+                        {integration.name}
+                        {!integration.enabled ? " (disabled)" : ""}
+                        {integration.bot_username ? ` — @${integration.bot_username}` : ""}
+                      </span>
+                    </label>
+                  ))
+                )}
               </div>
               {formError ? <p className="error-message">{formError}</p> : null}
               <div className="modal-actions">

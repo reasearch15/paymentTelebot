@@ -40,6 +40,7 @@ def serialize_action(success: bool, message: str, integration: TelegramIntegrati
         last_checked_at=integration.last_checked_at,
         last_success_at=integration.last_success_at,
         last_error=integration.last_error,
+        bot_username=integration.bot_username,
     )
 
 
