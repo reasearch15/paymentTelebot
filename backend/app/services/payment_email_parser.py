@@ -167,7 +167,7 @@ async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> Par
             result.amount_cents,
             result.sender_name,
         )
-        transaction = await create_transaction_from_parser_result(session, email, result)
+        transaction, created_transaction = await create_transaction_from_parser_result(session, email, result)
         email.parser_key = result.parser_key
         email.parser_version = result.parser_version
         email.parsed_payload_json = result.to_json()
@@ -185,7 +185,12 @@ async def parse_payment_email(session: AsyncSession, email: PaymentEmail) -> Par
             logger.info("Skipped %s email %s: %s", result.parser_key, email.id, result.classification)
         await session.commit()
         if transaction is not None and result.classification == "incoming_payment":
-            await send_transaction_notification(transaction.id)
+            # Only create missing route deliveries for brand-new transactions so reparse
+            # never fans historical payments out to newly assigned integrations.
+            await send_transaction_notification(
+                transaction.id,
+                create_missing_destinations=created_transaction,
+            )
         return result
     except Exception as exc:
         email.processing_status = ProcessingStatus.FAILED

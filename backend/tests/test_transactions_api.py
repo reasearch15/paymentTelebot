@@ -148,8 +148,8 @@ def test_same_sender_amount_keeps_separate_transactions() -> None:
     first_email, first_result = _payment_result("one")
     second_email, second_result = _payment_result("two")
 
-    first = asyncio.run(create_transaction_from_parser_result(session, first_email, first_result))
-    second = asyncio.run(create_transaction_from_parser_result(session, second_email, second_result))
+    first, _ = asyncio.run(create_transaction_from_parser_result(session, first_email, first_result))
+    second, _ = asyncio.run(create_transaction_from_parser_result(session, second_email, second_result))
 
     assert first is not second
     assert len(session.added) == 2
@@ -162,10 +162,12 @@ def test_duplicate_gmail_message_creates_one_transaction() -> None:
     session = FakeLedgerSession()
     email, result = _payment_result("dup")
 
-    first = asyncio.run(create_transaction_from_parser_result(session, email, result))
-    second = asyncio.run(create_transaction_from_parser_result(session, email, result))
+    first, first_created = asyncio.run(create_transaction_from_parser_result(session, email, result))
+    second, second_created = asyncio.run(create_transaction_from_parser_result(session, email, result))
 
     assert first is second
+    assert first_created is True
+    assert second_created is False
     assert len(session.added) == 1
     assert session.flushes == 1
 

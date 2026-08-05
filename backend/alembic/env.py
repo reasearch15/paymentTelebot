@@ -10,10 +10,12 @@ from app.db.base import Base
 from app.models import (
     app_setting,
     payment_account,
+    payment_account_telegram_route,
     payment_email,
     player_settlement,
     provider,
     settlement,
+    telegram_delivery,
     telegram_integration,
     transaction,
 )

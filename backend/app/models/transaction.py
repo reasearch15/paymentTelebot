@@ -44,6 +44,10 @@ class Transaction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     payment_account: Mapped["PaymentAccount"] = relationship(back_populates="transactions")
+    telegram_deliveries: Mapped[list["TelegramDelivery"]] = relationship(
+        back_populates="transaction",
+        passive_deletes=True,
+    )
 
 
 @event.listens_for(Transaction, "before_delete")

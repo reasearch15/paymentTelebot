@@ -27,3 +27,7 @@ class PaymentAccount(TimestampMixin, Base):
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="payment_account", passive_deletes=True)
     settlements: Mapped[list["Settlement"]] = relationship(back_populates="payment_account", passive_deletes=True)
     payment_emails: Mapped[list["PaymentEmail"]] = relationship(back_populates="payment_account", passive_deletes=True)
+    telegram_routes: Mapped[list["PaymentAccountTelegramRoute"]] = relationship(
+        back_populates="payment_account",
+        passive_deletes=True,
+    )

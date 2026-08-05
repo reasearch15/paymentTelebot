@@ -239,9 +239,9 @@ def test_auth_rejected_email_remains_visible_without_transaction_or_telegram(mon
 
     async def fake_create(session, email, result):
         create_calls.append(result)
-        return None
+        return None, False
 
-    async def fake_telegram(transaction_id: int):
+    async def fake_telegram(transaction_id: int, **_kwargs):
         telegram_calls.append(transaction_id)
 
     class FakeSession:
@@ -299,14 +299,14 @@ def test_genuine_email_parsed_twice_is_idempotent(monkeypatch) -> None:
 
     async def fake_create(session, email, result):
         if not result.is_payment:
-            return None
+            return None, False
         if existing["tx"] is not None:
-            return existing["tx"]
+            return existing["tx"], False
         transactions_created["n"] += 1
         existing["tx"] = FakeTx(7)
-        return existing["tx"]
+        return existing["tx"], True
 
-    async def fake_telegram(transaction_id: int):
+    async def fake_telegram(transaction_id: int, **_kwargs):
         # Mirror real telegram layer: already-sent notifications are skipped.
         if transaction_id in telegram_calls:
             return
@@ -451,9 +451,9 @@ def test_production_amy_f_parses_into_transaction(monkeypatch) -> None:
         assert result.is_payment is True
         assert result.amount_cents == 500
         assert result.sender_name == "Amy F."
-        return FakeTx()
+        return FakeTx(), True
 
-    async def fake_telegram(transaction_id: int):
+    async def fake_telegram(transaction_id: int, **_kwargs):
         telegram_calls.append(transaction_id)
 
     class FakeSession:
@@ -498,7 +498,7 @@ def test_production_amy_f_parses_into_transaction(monkeypatch) -> None:
 
 def test_unrelated_chime_security_email_is_ignored_with_reason(monkeypatch) -> None:
     async def fake_create(session, email, result):
-        return None
+        return None, False
 
     class FakeSession:
         async def commit(self) -> None:
@@ -527,7 +527,7 @@ def test_unrelated_chime_security_email_is_ignored_with_reason(monkeypatch) -> N
     )
     monkeypatch.setattr(payment_email_parser, "create_transaction_from_parser_result", fake_create)
 
-    async def noop(_id=None):
+    async def noop(_id=None, **_kwargs):
         return None
 
     monkeypatch.setattr(payment_email_parser, "send_transaction_notification", noop)
@@ -541,9 +541,9 @@ def test_unrelated_chime_security_email_is_ignored_with_reason(monkeypatch) -> N
 def test_missing_amount_becomes_parse_failed(monkeypatch) -> None:
     async def fake_create(session, email, result):
         # Ledger refuses incomplete payments.
-        return None
+        return None, False
 
-    async def noop(_id=None):
+    async def noop(_id=None, **_kwargs):
         return None
 
     class FakeSession:

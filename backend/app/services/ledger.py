@@ -21,15 +21,15 @@ async def create_transaction_from_parser_result(
     session: AsyncSession,
     email: PaymentEmail,
     result: ParserResult,
-) -> Transaction | None:
+) -> tuple[Transaction | None, bool]:
     if not result.is_payment or result.direction is None or result.amount_cents is None:
-        return None
+        return None, False
 
     gmail_message_id = stable_email_identifier(email)
     existing = await session.scalar(select(Transaction).where(Transaction.gmail_message_id == gmail_message_id))
     if existing is not None:
         logger.info("Ledger transaction duplicate skipped for message %s", gmail_message_id)
-        return existing
+        return existing, False
 
     received_at = result.payment_timestamp or email.received_at or datetime.now(UTC)
     transaction = Transaction(
@@ -54,4 +54,4 @@ async def create_transaction_from_parser_result(
         transaction.direction.value,
         transaction.amount_cents,
     )
-    return transaction
+    return transaction, True
