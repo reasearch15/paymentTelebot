@@ -48,6 +48,25 @@ class TelegramActionResponse(BaseModel):
     bot_username: str | None = None
 
 
+class TelegramIntegrationDeliveryStats(BaseModel):
+    messages_today: int = 0
+    sent_today: int = 0
+    failed_today: int = 0
+    pending: int = 0
+    last_delivery_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_failure_error: str | None = None
+    success_rate: float | None = None
+    average_attempts: float | None = None
+
+
+class PaymentAccountDeliveryStats(BaseModel):
+    messages_today: int = 0
+    telegram_destination_count: int = 0
+    last_payment_at: datetime | None = None
+    last_telegram_delivery_at: datetime | None = None
+
+
 class TelegramIntegrationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     bot_token: str = Field(min_length=1, max_length=2048)
@@ -125,6 +144,7 @@ class TelegramIntegrationRead(BaseModel):
     updated_at: datetime
     assigned_payment_account_count: int = 0
     is_legacy_default: bool = False
+    delivery_stats: TelegramIntegrationDeliveryStats | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -173,3 +193,106 @@ class TelegramDeliverySummary(BaseModel):
     failed: int = 0
     pending: int = 0
     sending: int = 0
+
+
+class TelegramDeliveryAttemptRead(BaseModel):
+    id: int
+    attempt_number: int
+    status: str
+    telegram_message_id: str | None = None
+    error_message: str | None = None
+    attempted_at: datetime
+    completed_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TelegramDeliveryTimelineEvent(BaseModel):
+    event: str
+    at: datetime | None = None
+    detail: str | None = None
+
+
+class TelegramDeliveryListItem(BaseModel):
+    id: int
+    status: str
+    telegram_integration_id: int
+    integration_name: str
+    bot_username: str | None = None
+    group_id: str | None = None
+    transaction_id: int
+    sender_name: str | None = None
+    amount_cents: int
+    provider_id: int
+    provider_name: str
+    payment_account_id: int
+    payment_account_name: str
+    payment_gmail: str
+    gmail_message_id: str
+    attempt_count: int
+    telegram_message_id: str | None = None
+    created_at: datetime
+    last_attempt_at: datetime | None = None
+    sent_at: datetime | None = None
+    last_error: str | None = None
+    can_retry: bool = False
+
+
+class TelegramDeliveryDetail(TelegramDeliveryListItem):
+    attempts: list[TelegramDeliveryAttemptRead] = Field(default_factory=list)
+    timeline: list[TelegramDeliveryTimelineEvent] = Field(default_factory=list)
+    receiver_tag: str | None = None
+    provider_reference: str | None = None
+    transaction_received_at: datetime | None = None
+    direction: str | None = None
+
+
+class TelegramDeliveryListResponse(BaseModel):
+    items: list[TelegramDeliveryListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class TelegramDeliveryRetryResponse(BaseModel):
+    ok: bool
+    reason: str | None = None
+    delivery_id: int
+    status: str | None = None
+    attempt_count: int | None = None
+    telegram_message_id: str | None = None
+    last_error: str | None = None
+    sent_at: str | None = None
+
+
+class TelegramDeliveryBulkRetryResponse(BaseModel):
+    attempted: int
+    succeeded: int
+    failed: int
+    skipped: int
+    results: list[TelegramDeliveryRetryResponse] = Field(default_factory=list)
+
+
+class TelegramDeliveryRetryFilterRequest(BaseModel):
+    status: str | None = None
+    integration_id: int | None = None
+    payment_account_id: int | None = None
+    provider_id: int | None = None
+    sender: str | None = None
+    amount_min: str | None = None
+    amount_max: str | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    search: str | None = None
+    transaction_id: int | None = None
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class TelegramDeliveryBrief(BaseModel):
+    id: int
+    status: str
+    integration_name: str
+    telegram_integration_id: int
+    attempt_count: int = 0
+    last_error: str | None = None
+    telegram_message_id: str | None = None

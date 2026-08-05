@@ -38,6 +38,7 @@ export const config = {
     "/emails/:path*",
     "/integrations/:path*",
     "/ledger/:path*",
+    "/telegram-deliveries/:path*",
     "/settlements/:path*",
     "/player-ledger/:path*",
     "/player-settlements/:path*",

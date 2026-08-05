@@ -13,6 +13,16 @@ type TelegramDeliverySummary = {
   sending: number;
 };
 
+type TelegramDeliveryBrief = {
+  id: number;
+  status: string;
+  integration_name: string;
+  telegram_integration_id: number;
+  attempt_count: number;
+  last_error: string | null;
+  telegram_message_id: string | null;
+};
+
 type LedgerTransaction = {
   id: number;
   payment_account_id: number;
@@ -25,6 +35,7 @@ type LedgerTransaction = {
   received_at: string;
   telegram_status: string;
   telegram_delivery_summary?: TelegramDeliverySummary | null;
+  telegram_deliveries?: TelegramDeliveryBrief[];
 };
 
 type LedgerTotals = {
@@ -68,6 +79,15 @@ function formatMoney(cents: number) {
 }
 
 function formatTelegramStatus(transaction: LedgerTransaction) {
+  const deliveries = transaction.telegram_deliveries ?? [];
+  if (deliveries.length > 0) {
+    return deliveries
+      .map((delivery) => {
+        const icon = delivery.status === "sent" ? "✓" : delivery.status === "failed" ? "✗" : "○";
+        return `${icon} ${delivery.integration_name}`;
+      })
+      .join(" · ");
+  }
   const summary = transaction.telegram_delivery_summary;
   if (summary && summary.total > 0) {
     const parts: string[] = [];

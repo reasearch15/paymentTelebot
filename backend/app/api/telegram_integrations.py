@@ -13,9 +13,12 @@ from app.models.telegram_integration import TelegramIntegration
 from app.schemas.telegram import (
     PaymentAccountAssignmentItem,
     TelegramActionResponse,
+    TelegramDeliveryBulkRetryResponse,
+    TelegramDeliveryRetryResponse,
     TelegramIntegrationAssignmentRead,
     TelegramIntegrationAssignmentUpdate,
     TelegramIntegrationCreate,
+    TelegramIntegrationDeliveryStats,
     TelegramIntegrationListItem,
     TelegramIntegrationRead,
     TelegramIntegrationUpdate,
@@ -31,6 +34,12 @@ from app.services.telegram_assignments import (
     list_routes_for_integration,
     replace_integration_payment_accounts,
 )
+from app.services.telegram_delivery_ops import (
+    DeliveryListFilters,
+    list_all_filtered_delivery_ids,
+    load_integration_delivery_stats,
+    retry_deliveries_by_ids,
+)
 
 router = APIRouter(
     prefix="/telegram-integrations",
@@ -44,6 +53,7 @@ def serialize_integration(
     *,
     assigned_count: int = 0,
     legacy_default_id: int | None = None,
+    delivery_stats: TelegramIntegrationDeliveryStats | None = None,
 ) -> TelegramIntegrationRead:
     token_mask = None
     if integration.bot_token_encrypted:
@@ -66,6 +76,7 @@ def serialize_integration(
         updated_at=integration.updated_at,
         assigned_payment_account_count=assigned_count,
         is_legacy_default=legacy_default_id is not None and integration.id == legacy_default_id,
+        delivery_stats=delivery_stats,
     )
 
 
@@ -92,12 +103,14 @@ async def list_telegram_integrations(db: AsyncSession = Depends(get_db)) -> list
     integrations = list((await db.scalars(select(TelegramIntegration).order_by(TelegramIntegration.id))).all())
     counts = await count_routes_by_integration(db)
     legacy_id = integrations[0].id if integrations else None
+    stats_map = await load_integration_delivery_stats(db, [item.id for item in integrations])
     return [
         TelegramIntegrationListItem(
             **serialize_integration(
                 integration,
                 assigned_count=counts.get(integration.id, 0),
                 legacy_default_id=legacy_id,
+                delivery_stats=TelegramIntegrationDeliveryStats(**stats_map.get(integration.id, {})),
             ).model_dump()
         )
         for integration in integrations
@@ -141,10 +154,12 @@ async def get_telegram_integration(
     integration = await get_integration_or_404(db, integration_id)
     counts = await count_routes_by_integration(db)
     legacy_id = await lowest_telegram_integration_id(db)
+    stats_map = await load_integration_delivery_stats(db, [integration.id])
     return serialize_integration(
         integration,
         assigned_count=counts.get(integration.id, 0),
         legacy_default_id=legacy_id,
+        delivery_stats=TelegramIntegrationDeliveryStats(**stats_map.get(integration.id, {})),
     )
 
 
@@ -338,4 +353,26 @@ async def put_telegram_integration_payment_accounts(
             )
             for account in accounts
         ],
+    )
+
+
+@router.post("/{integration_id}/retry-failed", response_model=TelegramDeliveryBulkRetryResponse)
+async def retry_failed_for_integration(
+    integration_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> TelegramDeliveryBulkRetryResponse:
+    await get_integration_or_404(db, integration_id)
+    filters = DeliveryListFilters(
+        integration_id=integration_id,
+        status="failed",
+        retryable_only=True,
+    )
+    delivery_ids = await list_all_filtered_delivery_ids(db, filters, limit=500)
+    result = await retry_deliveries_by_ids(delivery_ids)
+    return TelegramDeliveryBulkRetryResponse(
+        attempted=result["attempted"],
+        succeeded=result["succeeded"],
+        failed=result["failed"],
+        skipped=result["skipped"],
+        results=[TelegramDeliveryRetryResponse(**item) for item in result["results"]],
     )

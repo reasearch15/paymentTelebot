@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.settlement import AccountUnsettledBalance
-from app.schemas.telegram import TelegramDeliverySummary
+from app.schemas.telegram import TelegramDeliveryBrief, TelegramDeliverySummary
 
 
 class TransactionSummary(BaseModel):
@@ -24,6 +24,7 @@ class TransactionSummary(BaseModel):
     telegram_sent_at: datetime | None
     created_at: datetime
     telegram_delivery_summary: TelegramDeliverySummary | None = None
+    telegram_deliveries: list[TelegramDeliveryBrief] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 

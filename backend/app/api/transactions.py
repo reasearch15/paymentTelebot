@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,7 +9,12 @@ from app.models.payment_account import PaymentAccount
 from app.models.transaction import Transaction
 from app.schemas.settlement import AccountUnsettledBalance
 from app.schemas.transaction import LedgerListResponse, LedgerTotals, TransactionSummary
-from app.schemas.telegram import TelegramDeliverySummary
+from app.schemas.telegram import (
+    TelegramDeliveryBrief,
+    TelegramDeliveryBulkRetryResponse,
+    TelegramDeliveryRetryResponse,
+    TelegramDeliverySummary,
+)
 from app.services.pagination import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -20,6 +25,12 @@ from app.services.pagination import (
 )
 from app.services.settlement import compute_unsettled_balance_cents, sum_settled_cents, sum_transaction_amounts
 from app.services.telegram import load_delivery_summaries_for_transactions
+from app.services.telegram_delivery_ops import (
+    DeliveryListFilters,
+    list_all_filtered_delivery_ids,
+    load_delivery_briefs_for_transactions,
+    retry_deliveries_by_ids,
+)
 
 router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[Depends(require_admin)])
 
@@ -27,6 +38,7 @@ router = APIRouter(prefix="/transactions", tags=["transactions"], dependencies=[
 def serialize_transaction(
     transaction: Transaction,
     delivery_summary: TelegramDeliverySummary | None = None,
+    delivery_briefs: list[TelegramDeliveryBrief] | None = None,
 ) -> TransactionSummary:
     account = transaction.payment_account
     provider = account.provider
@@ -48,6 +60,7 @@ def serialize_transaction(
         telegram_sent_at=transaction.telegram_sent_at,
         created_at=transaction.created_at,
         telegram_delivery_summary=delivery_summary,
+        telegram_deliveries=delivery_briefs or [],
     )
 
 
@@ -147,8 +160,29 @@ async def list_transactions(
         db,
         [row.id for row in page_rows],
     )
+    delivery_briefs_map = await load_delivery_briefs_for_transactions(
+        db,
+        [row.id for row in page_rows],
+    )
     transactions = [
-        serialize_transaction(row, delivery_summaries.get(row.id))
+        serialize_transaction(
+            row,
+            delivery_summaries.get(row.id),
+            [
+                TelegramDeliveryBrief(
+                    id=delivery.id,
+                    status=delivery.status,
+                    integration_name=delivery.telegram_integration.name
+                    if delivery.telegram_integration
+                    else "Unknown",
+                    telegram_integration_id=delivery.telegram_integration_id,
+                    attempt_count=int(delivery.attempt_count or 0),
+                    last_error=delivery.last_error,
+                    telegram_message_id=delivery.telegram_message_id,
+                )
+                for delivery in delivery_briefs_map.get(row.id, [])
+            ],
+        )
         for row in page_rows
     ]
 
@@ -162,4 +196,24 @@ async def list_transactions(
         limit=page_size,
         next_cursor=next_cursor,
         has_more=has_more,
+    )
+
+
+@router.post("/{transaction_id}/retry-telegram", response_model=TelegramDeliveryBulkRetryResponse)
+async def retry_telegram_for_transaction(
+    transaction_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> TelegramDeliveryBulkRetryResponse:
+    transaction = await db.get(Transaction, transaction_id)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found.")
+    filters = DeliveryListFilters(transaction_id=transaction_id, retryable_only=True)
+    delivery_ids = await list_all_filtered_delivery_ids(db, filters, limit=100)
+    result = await retry_deliveries_by_ids(delivery_ids)
+    return TelegramDeliveryBulkRetryResponse(
+        attempted=result["attempted"],
+        succeeded=result["succeeded"],
+        failed=result["failed"],
+        skipped=result["skipped"],
+        results=[TelegramDeliveryRetryResponse(**item) for item in result["results"]],
     )

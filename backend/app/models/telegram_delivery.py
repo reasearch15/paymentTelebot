@@ -1,9 +1,15 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.telegram_delivery_attempt import TelegramDeliveryAttempt
+    from app.models.telegram_integration import TelegramIntegration
+    from app.models.transaction import Transaction
 
 TELEGRAM_DELIVERY_STATUSES = ("pending", "sending", "sent", "failed")
 
@@ -56,3 +62,8 @@ class TelegramDelivery(Base):
 
     transaction: Mapped["Transaction"] = relationship(back_populates="telegram_deliveries")
     telegram_integration: Mapped["TelegramIntegration"] = relationship(back_populates="deliveries")
+    attempts: Mapped[list["TelegramDeliveryAttempt"]] = relationship(
+        back_populates="delivery",
+        order_by="TelegramDeliveryAttempt.attempt_number",
+        passive_deletes=True,
+    )

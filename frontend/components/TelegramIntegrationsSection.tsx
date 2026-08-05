@@ -18,6 +18,17 @@ export type TelegramIntegration = {
   updated_at: string;
   assigned_payment_account_count: number;
   is_legacy_default?: boolean;
+  delivery_stats?: {
+    messages_today: number;
+    sent_today: number;
+    failed_today: number;
+    pending: number;
+    last_delivery_at: string | null;
+    last_failure_at: string | null;
+    last_failure_error: string | null;
+    success_rate: number | null;
+    average_attempts: number | null;
+  } | null;
 };
 
 type PaymentAccountSummary = {
@@ -342,6 +353,47 @@ export function TelegramIntegrationsSection({
                   <div>
                     <dt>Assigned Gmail accounts</dt>
                     <dd>{integration.assigned_payment_account_count}</dd>
+                  </div>
+                  <div>
+                    <dt>Messages today</dt>
+                    <dd>{integration.delivery_stats?.messages_today ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Sent today</dt>
+                    <dd>{integration.delivery_stats?.sent_today ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Failed today</dt>
+                    <dd>{integration.delivery_stats?.failed_today ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Pending</dt>
+                    <dd>{integration.delivery_stats?.pending ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Success rate</dt>
+                    <dd>
+                      {integration.delivery_stats?.success_rate != null
+                        ? `${integration.delivery_stats.success_rate}%`
+                        : "—"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Average attempts</dt>
+                    <dd>{integration.delivery_stats?.average_attempts ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Last delivery</dt>
+                    <dd>{formatDate(integration.delivery_stats?.last_delivery_at ?? null)}</dd>
+                  </div>
+                  <div>
+                    <dt>Last failure</dt>
+                    <dd>
+                      {formatDate(integration.delivery_stats?.last_failure_at ?? null)}
+                      {integration.delivery_stats?.last_failure_error
+                        ? ` · ${integration.delivery_stats.last_failure_error}`
+                        : ""}
+                    </dd>
                   </div>
                   <div>
                     <dt>Last checked</dt>

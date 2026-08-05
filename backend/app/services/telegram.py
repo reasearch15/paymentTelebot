@@ -2,8 +2,10 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 from urllib import parse, request
 from urllib.error import HTTPError, URLError
 
@@ -17,6 +19,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.payment_account import PaymentAccount
 from app.models.payment_account_telegram_route import PaymentAccountTelegramRoute
 from app.models.telegram_delivery import TelegramDelivery
+from app.models.telegram_delivery_attempt import TelegramDeliveryAttempt
 from app.models.telegram_integration import DEFAULT_TELEGRAM_INTEGRATION_NAME, TelegramIntegration
 from app.models.transaction import Direction, Transaction
 from app.schemas.telegram import TelegramDeliverySummary
@@ -392,14 +395,69 @@ async def ensure_transaction_deliveries(session: AsyncSession, transaction_id: i
     return delivery_ids
 
 
-async def claim_telegram_delivery(delivery_id: int) -> tuple[str, str] | None:
+def is_delivery_eligible_for_manual_retry(
+    delivery: TelegramDelivery,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Manual retry: failed always; sending only when stale. Never sent or pending."""
+    if delivery.status == "failed":
+        return True
+    if delivery.status == "sending":
+        return is_stale_delivery_sending(delivery, now=now)
+    return False
+
+
+async def _complete_delivery_attempt(
+    session: AsyncSession,
+    delivery: TelegramDelivery,
+    *,
+    status: str,
+    telegram_message_id: str | None = None,
+    error_message: str | None = None,
+    completed_at: datetime | None = None,
+) -> None:
+    done_at = completed_at or datetime.now(UTC)
+    attempt_number = max(int(delivery.attempt_count or 0), 1)
+    attempt = await session.scalar(
+        select(TelegramDeliveryAttempt)
+        .where(
+            TelegramDeliveryAttempt.telegram_delivery_id == delivery.id,
+            TelegramDeliveryAttempt.attempt_number == attempt_number,
+        )
+        .with_for_update()
+    )
+    if attempt is None:
+        session.add(
+            TelegramDeliveryAttempt(
+                telegram_delivery_id=delivery.id,
+                attempt_number=attempt_number,
+                status=status,
+                telegram_message_id=telegram_message_id,
+                error_message=error_message,
+                attempted_at=delivery.last_attempt_at or done_at,
+                completed_at=done_at,
+            )
+        )
+        return
+    attempt.status = status
+    attempt.telegram_message_id = telegram_message_id
+    attempt.error_message = error_message
+    attempt.completed_at = done_at
+
+
+async def _claim_telegram_delivery(
+    delivery_id: int,
+    *,
+    eligibility: Callable[[TelegramDelivery], bool],
+) -> tuple[str, str] | None:
     """Claim a delivery for sending. Returns (bot_token, group_id) when claimed, else None."""
     async with AsyncSessionLocal() as session:
         async with session.begin():
             delivery = await session.scalar(
                 select(TelegramDelivery).where(TelegramDelivery.id == delivery_id).with_for_update()
             )
-            if delivery is None or not is_delivery_eligible_for_normal_dispatch(delivery):
+            if delivery is None or not eligibility(delivery):
                 return None
 
             integration = await session.get(TelegramIntegration, delivery.telegram_integration_id)
@@ -411,11 +469,34 @@ async def claim_telegram_delivery(delivery_id: int) -> tuple[str, str] | None:
             if not group_id:
                 return None
 
+            now = datetime.now(UTC)
             delivery.status = "sending"
             delivery.attempt_count = int(delivery.attempt_count or 0) + 1
-            delivery.last_attempt_at = datetime.now(UTC)
+            delivery.last_attempt_at = now
             delivery.last_error = None
+            session.add(
+                TelegramDeliveryAttempt(
+                    telegram_delivery_id=delivery.id,
+                    attempt_number=int(delivery.attempt_count),
+                    status="sending",
+                    attempted_at=now,
+                )
+            )
             return bot_token, group_id
+
+
+async def claim_telegram_delivery(delivery_id: int) -> tuple[str, str] | None:
+    return await _claim_telegram_delivery(
+        delivery_id,
+        eligibility=is_delivery_eligible_for_normal_dispatch,
+    )
+
+
+async def claim_telegram_delivery_for_manual_retry(delivery_id: int) -> tuple[str, str] | None:
+    return await _claim_telegram_delivery(
+        delivery_id,
+        eligibility=is_delivery_eligible_for_manual_retry,
+    )
 
 
 async def mark_telegram_delivery_sent(delivery_id: int, telegram_message_id: str | None) -> None:
@@ -432,6 +513,13 @@ async def mark_telegram_delivery_sent(delivery_id: int, telegram_message_id: str
             delivery.sent_at = sent_at
             delivery.telegram_message_id = telegram_message_id
             delivery.last_error = None
+            await _complete_delivery_attempt(
+                session,
+                delivery,
+                status="sent",
+                telegram_message_id=telegram_message_id,
+                completed_at=sent_at,
+            )
             if integration is not None:
                 integration.last_success_at = sent_at
                 integration.last_error = None
@@ -455,6 +543,12 @@ async def mark_telegram_delivery_failed(delivery_id: int, exc: BaseException, bo
             safe_error = sanitize_telegram_error(exc, bot_token)
             delivery.status = "failed"
             delivery.last_error = safe_error
+            await _complete_delivery_attempt(
+                session,
+                delivery,
+                status="failed",
+                error_message=safe_error,
+            )
             if integration is not None:
                 integration.last_error = safe_error
             logger.warning(
@@ -466,17 +560,23 @@ async def mark_telegram_delivery_failed(delivery_id: int, exc: BaseException, bo
             )
 
 
-async def send_telegram_delivery(delivery_id: int) -> None:
-    claimed = await claim_telegram_delivery(delivery_id)
+async def send_telegram_delivery(
+    delivery_id: int,
+    *,
+    claim_fn: Callable[[int], Awaitable[tuple[str, str] | None]] | None = None,
+) -> bool:
+    """Send one delivery. Returns True if a claim was obtained (send was attempted)."""
+    claim = claim_fn or claim_telegram_delivery
+    claimed = await claim(delivery_id)
     if claimed is None:
-        return
+        return False
 
     bot_token, group_id = claimed
     delivery_transaction_id: int | None = None
     async with AsyncSessionLocal() as session:
         delivery = await session.get(TelegramDelivery, delivery_id)
         if delivery is None:
-            return
+            return False
         delivery_transaction_id = delivery.transaction_id
 
     try:
@@ -487,9 +587,48 @@ async def send_telegram_delivery(delivery_id: int) -> None:
         )
     except Exception as exc:
         await mark_telegram_delivery_failed(delivery_id, exc, bot_token)
-        return
+        return True
 
     await mark_telegram_delivery_sent(delivery_id, extract_telegram_message_id(api_response))
+    return True
+
+
+async def retry_telegram_delivery(delivery_id: int) -> dict[str, Any]:
+    """Manual retry for a single delivery using the shared claim/send path."""
+    async with AsyncSessionLocal() as session:
+        delivery = await session.get(TelegramDelivery, delivery_id)
+        if delivery is None:
+            return {"ok": False, "reason": "not_found", "delivery_id": delivery_id}
+        if delivery.status == "sent":
+            return {"ok": False, "reason": "already_sent", "delivery_id": delivery_id}
+        if delivery.status == "pending":
+            return {"ok": False, "reason": "pending_owned", "delivery_id": delivery_id}
+        if delivery.status == "sending" and not is_stale_delivery_sending(delivery):
+            return {"ok": False, "reason": "sending_in_progress", "delivery_id": delivery_id}
+        if not is_delivery_eligible_for_manual_retry(delivery):
+            return {"ok": False, "reason": "ineligible", "delivery_id": delivery_id}
+        transaction_id = delivery.transaction_id
+
+    attempted = await send_telegram_delivery(
+        delivery_id,
+        claim_fn=claim_telegram_delivery_for_manual_retry,
+    )
+    await update_transaction_telegram_rollup(transaction_id)
+
+    async with AsyncSessionLocal() as session:
+        delivery = await session.get(TelegramDelivery, delivery_id)
+        if not attempted or delivery is None:
+            return {"ok": False, "reason": "not_claimed", "delivery_id": delivery_id}
+        return {
+            "ok": delivery.status == "sent",
+            "reason": None if delivery.status == "sent" else "send_failed",
+            "delivery_id": delivery_id,
+            "status": delivery.status,
+            "attempt_count": delivery.attempt_count,
+            "telegram_message_id": delivery.telegram_message_id,
+            "last_error": delivery.last_error,
+            "sent_at": delivery.sent_at.isoformat() if delivery.sent_at else None,
+        }
 
 
 def compute_transaction_telegram_rollup(deliveries: list[TelegramDelivery]) -> dict[str, object]:

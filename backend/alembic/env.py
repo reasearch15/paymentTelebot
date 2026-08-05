@@ -16,6 +16,7 @@ from app.models import (
     provider,
     settlement,
     telegram_delivery,
+    telegram_delivery_attempt,
     telegram_integration,
     transaction,
 )

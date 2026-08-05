@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.schemas.telegram import PaymentAccountTelegramIntegrationSummary
+from app.schemas.telegram import PaymentAccountDeliveryStats, PaymentAccountTelegramIntegrationSummary
 
 
 class PaymentAccountCreate(BaseModel):
@@ -93,6 +93,7 @@ class PaymentAccountResponse(BaseModel):
     telegram_integrations: list[PaymentAccountTelegramIntegrationSummary] = Field(default_factory=list)
     telegram_integration_count: int = 0
     telegram_integration_ids: list[int] = Field(default_factory=list)
+    delivery_stats: PaymentAccountDeliveryStats | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

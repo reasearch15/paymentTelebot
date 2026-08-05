@@ -22,6 +22,7 @@ from app.schemas.payment_account import (
     PaymentAccountUpdate,
 )
 from app.schemas.telegram import (
+    PaymentAccountDeliveryStats,
     PaymentAccountTelegramAssignmentUpdate,
     PaymentAccountTelegramIntegrationsRead,
     PaymentAccountTelegramIntegrationSummary,
@@ -32,6 +33,7 @@ from app.services.telegram_assignments import (
     list_integrations_for_payment_account,
     replace_payment_account_telegram_integrations,
 )
+from app.services.telegram_delivery_ops import load_payment_account_delivery_stats
 
 router = APIRouter(prefix="/payment-accounts", tags=["payment accounts"], dependencies=[Depends(require_admin)])
 
@@ -78,8 +80,17 @@ def serialize_account(
     account: PaymentAccount,
     last_captured_email_at=None,
     telegram_integrations: list[PaymentAccountTelegramIntegrationSummary] | None = None,
+    delivery_stats: PaymentAccountDeliveryStats | None = None,
 ) -> PaymentAccountResponse:
     integrations = telegram_integrations or []
+    stats = delivery_stats
+    if stats is not None:
+        stats = PaymentAccountDeliveryStats(
+            messages_today=stats.messages_today,
+            telegram_destination_count=len(integrations),
+            last_payment_at=stats.last_payment_at or account.last_email_at,
+            last_telegram_delivery_at=stats.last_telegram_delivery_at,
+        )
     return PaymentAccountResponse(
         id=account.id,
         provider_id=account.provider_id,
@@ -98,6 +109,7 @@ def serialize_account(
         telegram_integrations=integrations,
         telegram_integration_count=len(integrations),
         telegram_integration_ids=[item.id for item in integrations],
+        delivery_stats=stats,
     )
 
 
@@ -164,11 +176,13 @@ async def list_payment_accounts(db: AsyncSession = Depends(get_db)) -> list[Paym
     accounts = list(result.scalars().all())
     last_captured = await get_last_captured_email_times(db)
     telegram_map = await load_account_telegram_summaries(db, [account.id for account in accounts])
+    stats_map = await load_payment_account_delivery_stats(db, [account.id for account in accounts])
     return [
         serialize_account(
             account,
             last_captured.get(account.id),
             telegram_map.get(account.id, []),
+            delivery_stats=PaymentAccountDeliveryStats(**stats_map.get(account.id, {})),
         )
         for account in accounts
     ]

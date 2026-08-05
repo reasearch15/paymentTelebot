@@ -39,6 +39,12 @@ type PaymentAccount = {
   telegram_integrations: PaymentAccountTelegramSummary[];
   telegram_integration_count: number;
   telegram_integration_ids: number[];
+  delivery_stats?: {
+    messages_today: number;
+    telegram_destination_count: number;
+    last_payment_at: string | null;
+    last_telegram_delivery_at: string | null;
+  } | null;
 };
 
 type ProviderFormState = {
@@ -339,6 +345,18 @@ export function IntegrationsManager() {
                   <div>
                     <dt>Telegram destinations</dt>
                     <dd>{account.telegram_integration_count}</dd>
+                  </div>
+                  <div>
+                    <dt>Today&apos;s messages</dt>
+                    <dd>{account.delivery_stats?.messages_today ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Last payment</dt>
+                    <dd>{formatDate(account.delivery_stats?.last_payment_at ?? account.last_email_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Last Telegram delivery</dt>
+                    <dd>{formatDate(account.delivery_stats?.last_telegram_delivery_at ?? null)}</dd>
                   </div>
                   <div>
                     <dt>Listener status</dt>
