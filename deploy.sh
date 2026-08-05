@@ -58,7 +58,7 @@ if [[ ! -x ".venv/bin/python" ]]; then
   fail "Backend virtual environment not found at $BACKEND_DIR/.venv"
 fi
 
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install .
 
 log "Running database migrations"
 
